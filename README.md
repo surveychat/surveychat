@@ -7,7 +7,7 @@
 
 > Simple setup instructions [here](https://surveychat.github.io/).
 
-> **Demo:** Try an experimental setup [here](https://surveychat.invisible.info) — use code ALPHA for a neutral chatbot, and BETA for an empathetic chatbot. The demo uses the open-source model `gpt-oss-120b`.
+> **Demo:** Try an experimental setup [here](https://surveychat.invisible.info) — use code ALPHA for a neutral chatbot, and BETA for an empathetic chatbot. This demo uses the open-source model `gpt-oss-120b`.
 
 surveychat works in two modes:
 
