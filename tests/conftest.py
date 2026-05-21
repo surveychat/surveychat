@@ -37,6 +37,8 @@ _st_mock.session_state = {
 }
 _st_mock.cache_resource = lambda fn: fn   # no-op decorator
 
-sys.modules.setdefault("streamlit", _st_mock)
-sys.modules.setdefault("dotenv",    MagicMock())
-sys.modules.setdefault("openai",    MagicMock())
+sys.modules.setdefault("streamlit",             _st_mock)
+sys.modules.setdefault("streamlit.components",      MagicMock())
+sys.modules.setdefault("streamlit.components.v1",   MagicMock())
+sys.modules.setdefault("dotenv",                 MagicMock())
+sys.modules.setdefault("openai",                 MagicMock())

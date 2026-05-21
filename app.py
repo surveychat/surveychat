@@ -91,9 +91,16 @@
 #  -------------
 #  Set API_BASE_URL to any chat-completions-compatible endpoint:
 #      OpenAI:            https://api.openai.com/v1
-#      Azure via LiteLLM: https://your-proxy.azurewebsites.net
 #      OpenRouter:        https://openrouter.ai/api/v1
-#      Local (LiteLLM):   http://localhost:4000
+#        (one key; access Claude, Gemini, Llama, Mistral, Grok, and 300+
+#         models - set "model" to e.g. "anthropic/claude-3-5-sonnet",
+#         "google/gemini-2.5-pro", "meta-llama/llama-3.3-70b-instruct")
+#      Groq:              https://api.groq.com/openai/v1
+#        (fast inference; model e.g. "llama-3.3-70b-versatile")
+#      Mistral AI:        https://api.mistral.ai/v1
+#        (model e.g. "mistral-large-latest")
+#      Azure via LiteLLM: https://your-proxy.azurewebsites.net
+#      Local (LM Studio, Ollama, llama.cpp, vLLM): http://localhost:1234/v1
 #
 #  QUICK START
 #  -----------
@@ -115,16 +122,20 @@
 import json
 import os
 import random
+import time
 from datetime import datetime, timezone
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 from dotenv import load_dotenv          # reads .env into os.environ automatically
 
 # Load the .env file so that OPENAI_API_KEY is available via os.environ
 # even when the app is run without pre-exporting it in the shell.
-load_dotenv()
+# override=True ensures .env always takes precedence over any stale value
+# that may already be set in the process environment.
+load_dotenv(override=True)
 
 
 # =============================================================================
@@ -219,23 +230,22 @@ def build_api_messages(conversation: list, system_prompt: str) -> list:
     ----------
     conversation : list[dict]
         The current value of st.session_state["messages"].  Each element
-        has "role" ("user" or "assistant"), "content", and "timestamp" keys.
+        has "role", "content", and "timestamp".
     system_prompt : str
         The hidden system prompt from the active condition dict.
 
     Returns
     -------
     list[dict]
-        A list of {"role": str, "content": str} dicts ready for the
-        chat completions endpoint.
+        A list of {"role": str, "content": str} dicts ready for the chat
+        completions endpoint.
     """
-    return (
-        [{"role": "system", "content": system_prompt}]
-        + [
-            {"role": m["role"], "content": m["content"]}
-            for m in conversation
-        ]
-    )
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in conversation:
+        messages.append({"role": m["role"], "content": m["content"]})
+    return messages
+
+
 
 
 def build_transcript(messages: list) -> dict:
@@ -270,16 +280,14 @@ def build_transcript(messages: list) -> dict:
     dict
         Transcript object suitable for json.dumps(indent=2, ensure_ascii=False).
     """
-    return {
-        "messages": [
-            {
-                "role":      "participant" if m["role"] == "user" else "assistant",
-                "content":   m["content"],
-                "timestamp": m.get("timestamp", ""),
-            }
-            for m in messages
-        ],
-    }
+    entries = []
+    for m in messages:
+        entries.append({
+            "role":      "participant" if m["role"] == "user" else "assistant",
+            "content":   m["content"],
+            "timestamp": m.get("timestamp", ""),
+        })
+    return {"messages": entries}
 
 
 # ╔═════════════════════════════════════════════════════════════════════════════╗
@@ -289,21 +297,36 @@ def build_transcript(messages: list) -> dict:
 # ── LLM API settings ──────────────────────────────────────────────────────────
 #
 #  API_BASE_URL  The base URL for your LLM API endpoint.
-#                - Azure LiteLLM proxy (default):
-#                    "https://ai-research-proxy.azurewebsites.net"
-#                - OpenAI:
+#                - OpenAI (default):
 #                    "https://api.openai.com/v1"
-#                - OpenRouter:
+#                - OpenRouter (access Claude, Gemini, Llama, Mistral, Groq,
+#                  and 300+ models with one API key):
 #                    "https://openrouter.ai/api/v1"
+#                - Anthropic (Claude) via OpenRouter:
+#                    set API_BASE_URL = "https://openrouter.ai/api/v1"
+#                    set "model" to e.g. "anthropic/claude-3-5-sonnet"
+#                - Google Gemini via OpenRouter:
+#                    set API_BASE_URL = "https://openrouter.ai/api/v1"
+#                    set "model" to e.g. "google/gemini-2.5-pro"
+#                - Groq (fast open-source models):
+#                    "https://api.groq.com/openai/v1"
+#                    set "model" to e.g. "llama-3.3-70b-versatile"
+#                - Mistral AI:
+#                    "https://api.mistral.ai/v1"
+#                    set "model" to e.g. "mistral-large-latest"
 #                - HuggingFace Inference API:
 #                    "https://api-inference.huggingface.co/v1"
 #                  (set OPENAI_API_KEY to your HuggingFace token;
 #                   set "model" to the HF model ID, e.g.
 #                   "meta-llama/Llama-3.3-70B-Instruct")
+#                - Azure OpenAI via LiteLLM proxy:
+#                    "https://your-proxy.azurewebsites.net"
+#                - Local model (LM Studio, Ollama, llama.cpp, vLLM):
+#                    "http://localhost:1234/v1"
 #
 #  The API key is read from OPENAI_API_KEY in the .env file - do not paste
-#  keys directly here.
-API_BASE_URL = "https://ai-research-proxy.azurewebsites.net"
+#  keys directly here.  For OpenRouter, use your OpenRouter key here.
+API_BASE_URL = "https://llmproxy.uva.nl/v1"
 
 # ── How many chatbot conditions does your study have? ─────────────────────────
 #
@@ -360,12 +383,38 @@ N_CONDITIONS = 2
 #                   effects are detectable in your outcome measures.
 #
 #  "model"          The model identifier string for this condition.
-#                   Common options:
-#                     "gpt-oss-120b"  - large open-weights model (default proxy)
-#                     "gpt4o"         - GPT-4o via OpenAI / Azure
-#                     "gpt4o-mini"    - GPT-4o Mini, faster and cheaper
+#                   Common options (OpenAI):
+#                     "gpt-4o"        - GPT-4o (capable, widely available)
+#                     "gpt-4o-mini"   - GPT-4o Mini, faster and cheaper
+#                     "gpt-4.1"       - GPT-4.1
+#                     "o4-mini"       - OpenAI reasoning model
+#                   Via OpenRouter (set API_BASE_URL to OpenRouter first):
+#                     "anthropic/claude-sonnet-4-5"  - Claude Sonnet
+#                     "anthropic/claude-haiku-3-5"   - Claude Haiku, fast/cheap
+#                     "google/gemini-2.5-pro"         - Gemini 2.5 Pro
+#                     "meta-llama/llama-3.3-70b-instruct" - Llama 3.3
+#                   Via Groq (fast inference, set API_BASE_URL accordingly):
+#                     "llama-3.3-70b-versatile"
 #                   Different conditions can use different models if you want
 #                   to directly compare model-level effects.
+#
+#  "initial_message"  (optional) The first message shown in the chat,
+#                   sent by the assistant before the participant types
+#                   anything.  Use this to open the conversation with a
+#                   scripted question rather than waiting for the
+#                   participant to initiate - common in structured and
+#                   semi-structured interview protocols.
+#                   Omit or set to "" for no opening message (participant
+#                   types first).
+#
+#  "temperature"    (optional) Per-condition response randomness.
+#                   Overrides the global TEMPERATURE setting for this
+#                   condition only.  Useful in experiments that directly
+#                   compare model consistency across arms.
+#
+#  "max_tokens"     (optional) Per-condition token cap.
+#                   Overrides the global MAX_TOKENS setting for this
+#                   condition only.
 #
 #  Tips
 #  ----
@@ -386,9 +435,9 @@ N_CONDITIONS = 2
 #              "question at a time, listen carefully, and ask follow-up "
 #              "questions to explore the participant's experience in depth. "
 #              "After 5-7 exchanges, thank the participant warmly and let "
-#              "them know they can click End this chat."
+#              "them know they can click End chat."
 #          ),
-#          "model": "gpt-oss-120b",
+#          "model": "gpt-4o",
 #      },
 #  ]
 
@@ -412,6 +461,7 @@ CONDITIONS = [
             "Do not volunteer unsolicited advice or personal anecdotes."
         ),
         "model": "gpt-oss-120b",
+        "initial_message": "Hello! I'm here to chat with you as part of this study. Feel free to share your thoughts. What's on your mind?",
     },
 
     # ── Condition B ───────────────────────────────────────────────────────────
@@ -435,6 +485,7 @@ CONDITIONS = [
             "participant seems to find important."
         ),
         "model": "gpt-oss-120b",
+        "initial_message": "Hello! I'm here to chat with you as part of this study. Feel free to share your thoughts. What's on your mind?",
     },
 
     # ── Add more conditions below by copying the block above ─────────────────
@@ -461,10 +512,39 @@ CONDITIONS = [
     #         "Do not summarise, conclude, or wrap up the conversation - your goal "
     #         "is continued, deepening inquiry."
     #     ),
-    #     "model": "gpt-oss-120b",
+    #     "model": "anthropic/claude-sonnet-4-5",  # or any other model
     # },
 
 ]
+
+# ── Optional model parameters ─────────────────────────────────────────────────
+#
+#  TEMPERATURE  Controls response randomness / creativity.
+#               0.0  = deterministic, highly consistent across sessions
+#               1.0  = default for most models, balanced
+#               >1.0 = more varied / creative, less predictable
+#               Set to None to use the model's default.
+#               In survey research, values between 0.7 and 1.0 usually work
+#               well.  Lower values reduce variability between participants,
+#               which can be useful for standardised interview protocols.
+TEMPERATURE = None   # e.g. 0.8, or None to use the model's default
+
+#  MAX_TOKENS   Hard cap on the number of tokens the model generates per reply.
+#               Prevents runaway responses and controls costs.
+#               Set to None for no cap (model decides).
+#               A typical assistant turn is 50-250 tokens; 512 is a safe cap
+#               for most survey/interview use cases.
+MAX_TOKENS = None    # e.g. 512, or None for no cap
+
+#  MAX_EXCHANGES  Hard limit on the number of participant turns.
+#                 When the participant sends their Nth message, the assistant
+#                 replies as normal, and the transcript is then shown
+#                 automatically - no "End chat" click required.
+#                 Set to None for no limit (participant ends manually).
+#                 Recommended for standardised interview protocols where all
+#                 participants should receive the same number of exchanges.
+#                 Example: MAX_EXCHANGES = 6 gives a 6-turn interview.
+MAX_EXCHANGES = None   # e.g. 6, or None for no limit
 
 # ── Study title (shown in the browser tab and as the page heading) ────────────
 STUDY_TITLE = "surveychat"
@@ -494,21 +574,20 @@ STUDY_TITLE = "surveychat"
 #       WELCOME_MESSAGE = (
 #           "Welcome. In this part of the study you will have a short "
 #           "conversation with an AI assistant about climate change. "
-#           "When you are done, click <strong>End this chat</strong> "
-#           "to receive your transcript."
+#           "When you are done, click <strong>End chat</strong> "
+#           "to copy your transcript and paste it into the survey."
 #       )
 #
 #       WELCOME_MESSAGE = (
 #           "This conversation is part of a research study on AI-assisted "
 #           "decision-making.  Your responses are confidential and will only "
 #           "be used for research purposes.<br><br>"
-#           "When finished, click <strong>End this chat</strong> to copy "
+#           "When finished, click <strong>End chat</strong> to copy "
 #           "your transcript and paste it into the survey."
 #       )
 WELCOME_MESSAGE = (
     "You are about to have a short conversation with an AI assistant. "
-    "When you are finished, click the <strong>End chat</strong> button to receive your transcript, "
-    "then paste it back into the survey."
+    "When you are finished, click <strong>End chat</strong>, then copy and paste your transcript into the survey."
 )
 
 # ── Prompt shown on the passcode entry screen (passcode routing only) ──────
@@ -523,12 +602,22 @@ PASSCODE_ENTRY_PROMPT = (
 #
 #  Variable               Default           Description
 #  ──────────────────────────────────────────────────────────────────────────────
-#  API_BASE_URL           (proxy URL)       Base URL for the LLM API endpoint.
+#  API_BASE_URL           (OpenAI URL)      Base URL for the LLM API endpoint.
 #  N_CONDITIONS           2                 1 = survey mode, 2 = A/B test,
 #                                           3+ = multi-arm experiment.
 #  CONDITIONS             [A, B]            List of condition dicts.  Each has
 #                                           "name", optional "passcode",
 #                                           "system_prompt", and "model".
+#  TEMPERATURE            None              Response randomness (0.0–2.0).
+#                                           None = model default (usually 1.0).
+#                                           Override per-condition with
+#                                           "temperature" in condition dict.
+#  MAX_TOKENS             None              Max tokens per assistant reply.
+#                                           None = no cap.
+#                                           Override per-condition with
+#                                           "max_tokens" in condition dict.
+#  MAX_EXCHANGES          None              Max participant turns before chat
+#                                           auto-ends. None = no limit.
 #  STUDY_TITLE            "surveychat"      Browser tab title and page heading.
 #  WELCOME_MESSAGE        (default string)  Banner shown above the chat.
 #                                           Set to "" to hide.
@@ -619,19 +708,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     line-height: 1.55;
 }
 
-/* ── Transcript panel ───────────────────────────────────────────────────────── */
-/* Shown after the participant clicks End.  Slightly more prominent border
-   than the welcome banner to draw attention to the copy instruction. */
-.transcript-banner {
-    background: #EFF1F3;
-    border: 1px solid #e5e7eb;
-    border-left: 4px solid #5C6C79;
-    border-radius: 0 8px 8px 0;
-    padding: 0.8rem 1.1rem;
-    font-size: 0.85rem;
-    color: #1F2429;
-    margin-bottom: 1.25rem;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -733,7 +809,7 @@ if "chat_ended" not in st.session_state:
     st.session_state["chat_ended"] = False
 
 # Two-step end-confirmation flag.
-# First click on "End this chat" sets this to True (arming the confirmation).
+# First click on "End chat" sets this to True (arming the confirmation).
 # Second click on "✓ Confirm" sets chat_ended to True and shows the transcript.
 # This prevents accidental chat termination and loss of the conversation.
 if "confirm_end" not in st.session_state:
@@ -774,7 +850,17 @@ def get_client(api_key: str, base_url: str) -> OpenAI:
     OpenAI
         A configured client instance.
     """
-    return OpenAI(api_key=api_key, base_url=base_url)
+    # Explicitly set Authorization in default_headers in addition to passing
+    # api_key.  Some versions of the openai SDK do not forward the auth header
+    # reliably when base_url points to a non-OpenAI endpoint (e.g. OpenRouter,
+    # LiteLLM proxies).  Setting it here guarantees the header is always sent.
+    return OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        default_headers={
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
 
 client = get_client(OPENAI_API_KEY, API_BASE_URL)
 
@@ -813,11 +899,11 @@ client = get_client(OPENAI_API_KEY, API_BASE_URL)
 #
 #  Stage 3 - Transcript panel
 #    • Displayed when chat_ended is True.
-#    • The transcript banner and JSON code block are rendered.
-#    • Streamlit’s st.code() provides a built-in copy button in the
-#      top-right corner of the block, requiring no custom JavaScript.
-#    • The participant copies the JSON and pastes it back into Qualtrics
-#      (or whichever survey tool they came from).
+#    • A JavaScript clipboard button copies the full transcript JSON with
+#      one click, turning green once copied.
+#    • A collapsed expander lets the participant optionally exclude
+#      individual messages before copying (all included by default).
+#    • The participant pastes the transcript into their survey tool.
 #
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown(
@@ -861,6 +947,19 @@ if not st.session_state["passcode_accepted"]:
 
 # Passcode accepted (or not required) - condition is now resolved.
 condition = CONDITIONS[st.session_state["condition_index"]]
+
+# ── Seed initial assistant message if configured ──────────────────────────────
+# If the condition defines an "initial_message", inject it as the first
+# assistant turn so the bot opens the conversation before the participant
+# types anything.  This is only done once: when messages is still empty.
+# Any subsequent reruns skip this block because messages is non-empty.
+_initial_msg = condition.get("initial_message", "").strip()
+if _initial_msg and not st.session_state["messages"]:
+    st.session_state["messages"].append({
+        "role":      "assistant",
+        "content":   _initial_msg,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
 # ── End Chat button - appears after the first exchange ────────────────────────
 # Placed below the header so it does not compete with the title layout.
@@ -922,15 +1021,43 @@ if not st.session_state["chat_ended"]:
             condition["system_prompt"],
         )
 
-        # Stream the model's response token-by-token for a natural feel
+        # Stream the model's response token-by-token.
         with st.chat_message("assistant"):
             try:
-                stream = client.chat.completions.create(
-                    model=condition["model"],
-                    messages=api_messages,
-                    stream=True,
-                )
-                response = st.write_stream(stream)
+                # Per-condition temperature/max_tokens override the global
+                # defaults, falling back to TEMPERATURE and MAX_TOKENS if the
+                # condition dict does not define them.
+                _call_kwargs = {
+                    "model":    condition["model"],
+                    "messages": api_messages,
+                }
+                _temp     = condition.get("temperature", TEMPERATURE)
+                _max_tok  = condition.get("max_tokens",  MAX_TOKENS)
+                if _temp is not None:
+                    _call_kwargs["temperature"] = _temp
+                if _max_tok is not None:
+                    _call_kwargs["max_tokens"] = _max_tok
+
+                _call_kwargs["stream"] = True
+                stream   = client.chat.completions.create(**_call_kwargs)
+
+                def _throttled(s):
+                    for chunk in s:
+                        yield chunk
+                        time.sleep(0.05)
+
+                response = st.write_stream(_throttled(stream))
+
+                # Some proxy implementations return an empty stream instead of
+                # raising an exception on error (e.g. rate-limit 429).  Treat
+                # an empty response as a failure so the error handler fires.
+                if not response:
+                    raise RuntimeError(
+                        "The model returned an empty response. "
+                        "This may be a rate-limit or temporary API issue — "
+                        "please wait a moment and try again."
+                    )
+
             except Exception as e:
                 response = None
                 # Remove the user message we just appended - leaving it in
@@ -943,17 +1070,32 @@ if not st.session_state["chat_ended"]:
                     f"Error: `{e}`"
                 )
 
-        # Save the completed assistant response to history
+        # Save the completed assistant response to history.
         if response:
             st.session_state["messages"].append({
-                "role": "assistant",
-                "content": response,
+                "role":      "assistant",
+                "content":   response,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
-        # On the very first exchange, force a rerun so the header re-renders
-        # and the End button becomes visible immediately.
-        if len(st.session_state["messages"]) == 2:
+        # Auto-end when MAX_EXCHANGES limit is reached.
+        # Count only participant turns (role == "user") so that a seeded
+        # initial_message (role == "assistant") does not affect the tally.
+        if MAX_EXCHANGES is not None:
+            _user_turns = sum(
+                1 for m in st.session_state["messages"] if m["role"] == "user"
+            )
+            if _user_turns >= MAX_EXCHANGES:
+                st.session_state["chat_ended"] = True
+                st.rerun()
+
+        # On the very first user exchange, force a rerun so the End button
+        # becomes visible immediately.  Count only user turns so this fires
+        # correctly whether or not an initial_message is configured.
+        _user_turns_now = sum(
+            1 for m in st.session_state["messages"] if m["role"] == "user"
+        )
+        if _user_turns_now == 1:
             st.rerun()
 
 # =============================================================================
@@ -974,25 +1116,112 @@ if not st.session_state["chat_ended"]:
 #      data <- fromJSON(transcript_string)
 #      df   <- as.data.frame(data$messages)   # one row per turn
 #
-#  Streamlit's st.code() block has a built-in copy button in the top-right
-#  corner - one click copies everything to the clipboard.
-
 else:
-    st.markdown(
-        '<div class="transcript-banner">'
-        'Your chat has ended. Your transcript is below. '
-        'Click the <strong>copy symbol in the top-right corner</strong> of the box, '
-        'then paste it back into the survey.'
-        '</div>',
-        unsafe_allow_html=True,
+    # Collect participant message indices and build transcript first.
+    # Checkbox state persists in st.session_state across rerenders, so the
+    # JSON is always up-to-date even though the checkboxes render below.
+    _participant_indices = []
+    for _i, _msg in enumerate(st.session_state["messages"]):
+        if _msg["role"] == "assistant":
+            continue
+        _participant_indices.append(_i)
+
+    # Build transcript now, reflecting current checkbox states.
+    _unshared = {
+        _i for _i in _participant_indices
+        if not st.session_state.get(f"share_msg_{_i}", True)
+    }
+    _msgs_for_transcript = [
+        {**m, "content": "Message unshared by participant"} if idx in _unshared else m
+        for idx, m in enumerate(st.session_state["messages"])
+    ]
+    _transcript_json = json.dumps(
+        build_transcript(_msgs_for_transcript), indent=2, ensure_ascii=False
+    )
+    _js_str = json.dumps(_transcript_json)  # safe JS string literal
+
+    components.html(
+        f"""
+        <style>
+          body {{ margin: 0; font-family: sans-serif; }}
+          #copy-btn {{
+            width: 100%; padding: 0.55rem 1rem;
+            font-size: 1rem; font-weight: 600;
+            background: #ff4b4b; color: white;
+            border: none; border-radius: 0.5rem; cursor: pointer;
+          }}
+          #copy-btn:hover {{ background: #e03535; }}
+          #copy-btn:disabled {{ background: #21c354; cursor: default; }}
+          #fallback {{ display: none; margin-top: 0.75rem; font-size: 0.85rem; color: #555; }}
+          #fallback textarea {{
+            width: 100%; height: 80px; font-size: 0.75rem;
+            font-family: monospace; margin-top: 0.25rem;
+          }}
+        </style>
+        <button id="copy-btn" onclick="copyTranscript(this)">
+          &#10003;&nbsp; Confirm &amp; copy transcript to clipboard
+        </button>
+        <div id="fallback">
+          <p>Automatic copy failed. Select all and copy manually:</p>
+          <textarea id="fallback-ta" readonly></textarea>
+        </div>
+        <script>
+        function copyTranscript(btn) {{
+          const text = {_js_str};
+          function onSuccess() {{
+            btn.textContent = '\u2713 Copied! Paste it into your survey.';
+            btn.disabled = true;
+          }}
+          function onFail() {{
+            btn.style.display = 'none';
+            var fb = document.getElementById('fallback');
+            var ta = document.getElementById('fallback-ta');
+            ta.value = text;
+            fb.style.display = 'block';
+            ta.focus(); ta.select();
+          }}
+          if (navigator.clipboard && window.isSecureContext) {{
+            navigator.clipboard.writeText(text).then(onSuccess, onFail);
+          }} else {{
+            try {{
+              var ta2 = document.createElement('textarea');
+              ta2.value = text;
+              ta2.style.cssText = 'position:fixed;left:-9999px';
+              document.body.appendChild(ta2);
+              ta2.focus(); ta2.select();
+              document.execCommand('copy');
+              document.body.removeChild(ta2);
+              onSuccess();
+            }} catch(e) {{ onFail(); }}
+          }}
+        }}
+        </script>
+        """,
+        height=60,
+        scrolling=False,
     )
 
-    # Build and render the transcript.
-    # See build_transcript() in the HELPER FUNCTIONS section for design notes
-    # on why condition name/model are excluded and how the role label works.
-    transcript = build_transcript(st.session_state["messages"])
-
-    st.code(json.dumps(transcript, indent=2, ensure_ascii=False), language="json")
+    with st.expander("Want to exclude a message before sharing? (optional)"):
+        st.caption(
+            "Uncheck any messages you'd prefer not to share."
+        )
+        for _i in _participant_indices:
+            _msg = st.session_state["messages"][_i]
+            _is_shared = st.session_state.get(f"share_msg_{_i}", True)
+            _col_cb, _col_msg = st.columns([1, 11])
+            with _col_cb:
+                st.checkbox(
+                    "include",
+                    value=True,
+                    key=f"share_msg_{_i}",
+                    label_visibility="collapsed",
+                )
+            with _col_msg:
+                with st.chat_message("user"):
+                    if _is_shared:
+                        st.markdown(_msg["content"])
+                    else:
+                        st.markdown(f"~~{_msg['content']}~~")
 
 
 # =============================================================================

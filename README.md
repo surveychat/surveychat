@@ -37,7 +37,7 @@ Copying the transcript when done:
 You will need:
 
 - **Python 3.10 or newer.** Check by running `python3 --version` in your terminal. If you don't have Python, download it from [python.org](https://www.python.org/downloads/).
-- **An API key and endpoint.** surveychat uses a large language model (LLM) to power the chatbot. You will need an API key from any compatible provider (OpenAI, Azure, OpenRouter, or a local proxy). The key is stored in the `OPENAI_API_KEY` environment variable by convention. You will also set `API_BASE_URL` in `app.py` to point to your provider's chat-completions endpoint (see [Step 3 - Optional settings](#step-3---optional-settings)).
+- **An API key and endpoint.** surveychat uses a large language model (LLM) to power the chatbot. You will need an API key from any compatible provider — **OpenAI**, **Anthropic** (Claude), **Google** (Gemini), **Groq**, **Mistral AI**, **HuggingFace**, a local model, or any other provider accessible via [OpenRouter](https://openrouter.ai) or a LiteLLM proxy. The key is stored in the `OPENAI_API_KEY` environment variable by convention. You will also set `API_BASE_URL` in `app.py` to point to your provider's chat-completions endpoint (see [Step 3 - Optional settings](#step-3---optional-settings)).
 - **A terminal.** On macOS/Linux open **Terminal**. On Windows open **Command Prompt** or **PowerShell**.
 
 ---
@@ -115,8 +115,8 @@ The `CONDITIONS` list defines each chatbot version. Each version is a block of s
 CONDITIONS = [
     {
         "name":          "Interview bot",
-        "system_prompt": "You are a friendly research interviewer. Ask one open-ended question at a time about the participant's social media habits. After 5–6 exchanges, thank them and let them know they can click End this chat.",
-        "model":         "gpt-oss-120b",
+        "system_prompt": "You are a friendly research interviewer. Ask one open-ended question at a time about the participant's social media habits. After 5–6 exchanges, thank them and let them know they can click End chat.",
+        "model":         "gpt-4o",
     },
 ]
 ```
@@ -129,13 +129,13 @@ CONDITIONS = [
         "name":          "Condition A - Neutral",
         "passcode":      "ALPHA",
         "system_prompt": "You are a neutral research assistant. Answer questions clearly and factually without expressing opinions.",
-        "model":         "gpt-oss-120b",
+        "model":         "gpt-4o",
     },
     {
         "name":          "Condition B - Empathetic",
         "passcode":      "BETA",
         "system_prompt": "You are a warm, empathetic research assistant. Acknowledge the participant's feelings before responding.",
-        "model":         "gpt-oss-120b",
+        "model":         "gpt-4o",
     },
 ]
 ```
@@ -147,7 +147,10 @@ CONDITIONS = [
 | `"name"` | Always | A label for your own reference. Participants never see this. |
 | `"passcode"` | Experiment mode only | The code a participant enters to reach this condition. Case-insensitive (`"alpha"` and `"ALPHA"` are the same). Leave this out when `N_CONDITIONS = 1`. |
 | `"system_prompt"` | Always | The hidden instruction that tells the chatbot how to behave. Participants never see this text. |
-| `"model"` | Always | Which AI model to use. Ask your lab coordinator which model name to use. |
+| `"model"` | Always | Which AI model to use (e.g. `"gpt-4o"`, `"gpt-4o-mini"`). |
+| `"initial_message"` | Optional | A scripted opening message the bot sends before the participant types anything. Useful for structured interview protocols that start with a fixed question. Omit for no opening message (participant types first). |
+| `"temperature"` | Optional | Overrides the global `TEMPERATURE` for this condition only. Useful in multi-arm experiments comparing response styles. |
+| `"max_tokens"` | Optional | Overrides the global `MAX_TOKENS` for this condition only. |
 
 ---
 
@@ -157,13 +160,38 @@ CONDITIONS = [
 API_BASE_URL = "https://api.openai.com/v1"
 # The base URL for your LLM provider's chat-completions endpoint.
 # Common values:
-#   OpenAI:       "https://api.openai.com/v1"
-#   OpenRouter:   "https://openrouter.ai/api/v1"
-#   HuggingFace:  "https://api-inference.huggingface.co/v1"
-#                 (set OPENAI_API_KEY to your HF token; set "model" to
-#                  the HF model ID, e.g. "meta-llama/Llama-3.3-70B-Instruct")
-#   Local model:  "http://localhost:1234/v1"
-# Any chat-completions-compatible endpoint will work.
+#   OpenAI:        "https://api.openai.com/v1"
+#   OpenRouter:    "https://openrouter.ai/api/v1"
+#                  (single key; access Claude, Gemini, Llama, Mistral,
+#                   Grok, Qwen, and 300+ models — set "model" to e.g.
+#                   "anthropic/claude-3-5-sonnet", "google/gemini-2.5-pro",
+#                   "meta-llama/llama-3.3-70b-instruct")
+#   Groq:          "https://api.groq.com/openai/v1"
+#                  (fast inference; model e.g. "llama-3.3-70b-versatile")
+#   Mistral AI:    "https://api.mistral.ai/v1"
+#                  (model e.g. "mistral-large-latest")
+#   HuggingFace:   "https://api-inference.huggingface.co/v1"
+#                  (set OPENAI_API_KEY to your HF token; set "model" to
+#                   the HF model ID, e.g. "meta-llama/Llama-3.3-70B-Instruct")
+#   Local model:   "http://localhost:1234/v1"
+#                  (LM Studio, Ollama, llama.cpp, vLLM, LocalAI)
+# Any OpenAI-compatible chat-completions endpoint will work.
+
+TEMPERATURE = None
+# Response randomness: 0.0 = deterministic, 1.0 = default, >1.0 = more varied.
+# Set to None to use the model's default.
+# You can also set "temperature" inside a condition dict to override per-arm.
+
+MAX_TOKENS = None
+# Hard cap on tokens per assistant reply (controls cost and response length).
+# e.g. 512 for concise replies. Set to None for no cap.
+# You can also set "max_tokens" inside a condition dict to override per-arm.
+
+MAX_EXCHANGES = None
+# Hard limit on participant turns. When the participant sends their Nth
+# message, the assistant replies and the transcript is shown automatically.
+# Set to None for no limit (participant clicks End chat manually).
+# Recommended for standardised protocols: e.g. MAX_EXCHANGES = 6.
 
 STUDY_TITLE = "surveychat"
 # The name shown in the browser tab and at the top of the page.

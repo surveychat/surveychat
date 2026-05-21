@@ -1,5 +1,4 @@
-"""
-tests/test_helpers.py — unit tests for the three pure helper functions
+"""tests/test_helpers.py — unit tests for the three pure helper functions
 defined in app.py: validate_passcode_routing, build_api_messages, and
 build_transcript.
 
@@ -230,3 +229,4 @@ class TestBuildTranscript:
         for msg in result["messages"]:
             assert "condition" not in msg
             assert "model" not in msg
+
