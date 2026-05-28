@@ -1,4 +1,4 @@
-"""tests/test_helpers.py — unit tests for the three pure helper functions
+"""tests/test_helpers.py: unit tests for the three pure helper functions
 defined in app.py: validate_passcode_routing, build_api_messages, and
 build_transcript.
 
@@ -72,7 +72,7 @@ class TestValidatePasscodeRouting:
         conditions = [
             {"name": "A", "passcode": "ALPHA", "system_prompt": "…", "model": "m"},
             {"name": "B", "passcode": "BETA",  "system_prompt": "…", "model": "m"},
-            # Extra entry deliberately missing a passcode — should be ignored.
+            # Extra entry deliberately missing a passcode; should be ignored.
             {"name": "C", "system_prompt": "…", "model": "m"},
         ]
         app.validate_passcode_routing(conditions, 2)

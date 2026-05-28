@@ -1,5 +1,5 @@
 """
-conftest.py — pytest configuration for surveychat tests.
+conftest.py: pytest configuration for surveychat tests.
 
 app.py is a self-contained Streamlit application: importing it runs
 top-level Streamlit calls (st.set_page_config, st.error, st.stop, etc.)

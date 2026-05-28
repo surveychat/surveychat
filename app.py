@@ -7,8 +7,11 @@
 #  surveychat supports two use modes:
 #
 #  Survey mode  (N_CONDITIONS = 1)
-#    Every participant talks to the same chatbot.  No passcodes, no
-#    randomization.  Use this for open-ended interviews, cognitive
+#    Every participant talks to the same chatbot.  No randomization.
+#    Access can optionally be gated with a shared passcode by adding a
+#    "passcode" key to the single condition dict.  Omit it to let
+#    participants go straight to the chat.
+#    Use this for open-ended interviews, cognitive
 #    interviewing, pilot testing, or any qualitative data collection that
 #    benefits from a conversational format rather than a plain text box.
 #    Examples: exploratory interviews, pilot testing, cognitive debriefs,
@@ -17,7 +20,10 @@
 #
 #  Experiment mode  (N_CONDITIONS >= 2)
 #    Participants are routed to one of N chatbot "conditions", each defined
-#    by a unique system prompt and model choice.  Use this for A/B tests or
+#    by a unique system prompt and model choice.  Every condition must have
+#    a unique passcode.  Your survey tool (e.g. Qualtrics) shows each
+#    participant the right code before they open the chat link; entering it
+#    routes them to exactly that condition.  Use this for A/B tests or
 #    multi-arm studies that compare how different chatbot styles affect
 #    participant responses, attitudes, or behaviour.
 #    Examples: comparing empathetic vs. neutral interviewers, testing
@@ -121,13 +127,11 @@
 # ── Standard library ──────────────────────────────────────────────────────────
 import json
 import os
-import random
 import time
 from datetime import datetime, timezone
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import streamlit as st
-import streamlit.components.v1 as components
 from openai import OpenAI
 from dotenv import load_dotenv          # reads .env into os.environ automatically
 
@@ -163,8 +167,9 @@ def validate_passcode_routing(conditions: list, n_conditions: int) -> None:
     Check passcode-routing configuration and halt the app on any inconsistency.
 
     Enforces three invariants:
-      1. If any active condition defines a "passcode" field, every active
-         condition must define one (no partial configuration).
+      1. In experiment mode (n_conditions > 1), every active condition must
+         define a "passcode" field.  Partial configuration (some but not
+         all conditions have a passcode) is also rejected in any mode.
       2. Every passcode value must be a non-empty string after stripping
          leading and trailing whitespace.
       3. All passcodes must be unique when compared case-insensitively.
@@ -184,14 +189,24 @@ def validate_passcode_routing(conditions: list, n_conditions: int) -> None:
     active    = conditions[:n_conditions]
     passcoded = [c for c in active if "passcode" in c]
 
-    # Invariant 1: Partial configuration - some but not all conditions define
-    # a passcode.  Either every arm needs a passcode (passcode routing) or
-    # none do (random routing).  A mixed state is always a mistake.
+    # Invariant 1a: Experiment mode requires a passcode on every condition.
+    # Participants must be traceable to a known arm, so random routing is
+    # not supported when N > 1.
+    if n_conditions > 1 and len(passcoded) == 0:
+        st.error(
+            f"Experiment mode requires a `\"passcode\"` on every condition, "
+            f"but none of the **{n_conditions}** active conditions define one. "
+            "Add a unique passcode to each condition in the CONDITIONS list."
+        )
+        st.stop()
+
+    # Invariant 1b: Partial configuration is always an error.
+    # Either every active condition has a passcode or none do.
     if 0 < len(passcoded) < n_conditions:
         st.error(
-            f"Passcode routing is partially configured: **{len(passcoded)}** of "
+            f"Passcode configuration is incomplete: **{len(passcoded)}** of "
             f"**{n_conditions}** active conditions have a `\"passcode\"` field. "
-            "Either add a `\"passcode\"` to every condition or remove them all."
+            "Every active condition must have a passcode."
         )
         st.stop()
 
@@ -331,8 +346,9 @@ API_BASE_URL = "https://llmproxy.uva.nl/v1"
 # ── How many chatbot conditions does your study have? ─────────────────────────
 #
 #   N_CONDITIONS = 1   →  Survey mode.  Every participant talks to the same
-#                          chatbot.  No passcodes or randomization needed.
-#                          The passcode gate screen is suppressed entirely;
+#                          chatbot.  No randomization.
+#                          Add a "passcode" to CONDITIONS[0] to gate access
+#                          with a shared entry code; omit it to let
 #                          participants go straight to the chat.
 #                          Use this for structured or semi-structured
 #                          interviews, pilot testing, cognitive debriefs, or
@@ -340,12 +356,13 @@ API_BASE_URL = "https://llmproxy.uva.nl/v1"
 #                          text-entry question.
 #
 #   N_CONDITIONS = 2   →  Experiment mode, classic A/B test.
-#                          Participants are split ~50 / 50 across two
-#                          conditions and enter a passcode to reach their arm.
+#                          Each condition requires a unique "passcode".
+#                          Participants receive their code from the survey
+#                          tool and enter it to reach their condition.
 #
 #   N_CONDITIONS = 3+  →  Experiment mode, multi-arm.
-#                          Participants are split as evenly as possible across
-#                          all conditions.
+#                          Same as above: a unique passcode is required on
+#                          every condition.
 #
 #   Default: 2
 N_CONDITIONS = 2
@@ -362,12 +379,14 @@ N_CONDITIONS = 2
 #                   to identify the condition when reviewing data or logs.
 #
 #  "passcode"       Passcode that routes participants to this condition.
-#                   Only needed in experiment mode (N_CONDITIONS > 1).
-#                   Assign one unique passcode per condition and configure
-#                   your survey tool to display the correct passcode to each
-#                   participant before they open the chat link.
+#                   Required in experiment mode (N_CONDITIONS > 1): every
+#                   active condition must have a unique passcode.  Configure
+#                   your survey tool to show each participant their code
+#                   before they open the chat link.
+#                   Optional in survey mode (N_CONDITIONS = 1): include a
+#                   passcode to gate access with a shared entry code, or
+#                   omit it to let participants go straight to the chat.
 #                   Matching is case-insensitive ("alpha" == "ALPHA").
-#                   Omit this field entirely when N_CONDITIONS = 1.
 #
 #  "system_prompt"  The hidden instruction sent to the model at the very
 #                   start of every conversation.  Participants never see
@@ -424,11 +443,12 @@ N_CONDITIONS = 2
 #    at once.  Vague prompts produce inconsistent behavior across sessions.
 #  - Test each condition manually before launching the study.
 #
-#  Survey mode example (N_CONDITIONS = 1, no "passcode" field needed):
+#  Survey mode example (N_CONDITIONS = 1):
 #  ─────────────────────────────────────────────────────────────────────
 #  CONDITIONS = [
 #      {
 #          "name":          "Social-media interview bot",
+#          "passcode":      "STUDY2026",   # remove this line to skip the gate
 #          "system_prompt": (
 #              "You are a friendly research interviewer studying how people "
 #              "use social media in their daily lives.  Ask one open-ended "
@@ -437,7 +457,7 @@ N_CONDITIONS = 2
 #              "After 5-7 exchanges, thank the participant warmly and let "
 #              "them know they can click End chat."
 #          ),
-#          "model": "gpt-4o",
+#          "model": "gpt-oss-120b",
 #      },
 #  ]
 
@@ -449,19 +469,17 @@ CONDITIONS = [
         "passcode":      "ALPHA",      # routes participants to this condition
         "system_prompt": (
             "You are a neutral, information-focused research assistant participating "
-            "in an academic study. Your role is to respond to the participant's "
-            "messages in a clear, balanced, and factual manner. "
-            "Do not express personal opinions, take sides, or use emotionally charged "
-            "language. Maintain a consistent, professional tone throughout. "
-            "If the participant raises a topic that is subjective or contested, "
-            "present relevant considerations from multiple perspectives without "
-            "endorsing any particular view. "
-            "Keep your responses concise but complete - aim for two to four sentences "
-            "unless the participant explicitly asks for more detail. "
-            "Do not volunteer unsolicited advice or personal anecdotes."
+            "in an academic study. Respond to the participant's messages in a clear, "
+            "factual, and impersonal manner. "
+            "Do not acknowledge feelings, offer encouragement, or use warm language. "
+            "Do not say things like 'I understand', 'that makes sense', or 'thank you "
+            "for sharing'. "
+            "If the participant raises an emotional or personal topic, respond only to "
+            "its factual content and do not comment on the emotional dimension. "
+            "Keep every response to two or three sentences. Be direct and concise."
         ),
         "model": "gpt-oss-120b",
-        "initial_message": "Hello! I'm here to chat with you as part of this study. Feel free to share your thoughts. What's on your mind?",
+        "initial_message": "Hello. I'm here to assist you as part of this study. What would you like to discuss?",
     },
 
     # ── Condition B ───────────────────────────────────────────────────────────
@@ -471,21 +489,19 @@ CONDITIONS = [
         "system_prompt": (
             "You are a warm, empathetic research assistant participating in an "
             "academic study. Your role is to make the participant feel genuinely "
-            "heard and understood throughout the conversation. "
-            "Begin each response by briefly acknowledging the participant's "
-            "feelings or perspective before offering any information or asking "
-            "a follow-up question - for example, by reflecting back what they "
-            "said or validating their experience without being patronising. "
-            "Use a conversational, supportive tone. Avoid clinical or bureaucratic "
-            "language. When a participant shares something personal or emotionally "
-            "significant, slow down and engage with that before moving on. "
-            "Keep your responses concise but warm - aim for two to four sentences "
-            "unless the participant explicitly asks for more detail. "
-            "Do not minimise, dismiss, or redirect away from anything the "
-            "participant seems to find important."
+            "heard and understood. "
+            "Always begin your response by acknowledging the participant's feelings "
+            "or perspective - reflect back what they said or validate their experience "
+            "before you offer any information or ask a follow-up question. "
+            "Use a caring, conversational tone throughout. When a participant shares "
+            "something personal or emotionally significant, spend time on that before "
+            "moving on - never rush past it. "
+            "Ask one warm follow-up question at the end of each response to invite "
+            "the participant to share more. "
+            "Never sound clinical, detached, or bureaucratic."
         ),
         "model": "gpt-oss-120b",
-        "initial_message": "Hello! I'm here to chat with you as part of this study. Feel free to share your thoughts. What's on your mind?",
+        "initial_message": "Hello! I'm really glad you're here. This is a space where you can share whatever's on your mind. What would you like to talk about today?",
     },
 
     # ── Add more conditions below by copying the block above ─────────────────
@@ -512,7 +528,7 @@ CONDITIONS = [
     #         "Do not summarise, conclude, or wrap up the conversation - your goal "
     #         "is continued, deepening inquiry."
     #     ),
-    #     "model": "anthropic/claude-sonnet-4-5",  # or any other model
+    #     "model": "mistral-small-3.2",  # or any other model
     # },
 
 ]
@@ -585,18 +601,13 @@ STUDY_TITLE = "surveychat"
 #           "When finished, click <strong>End chat</strong> to copy "
 #           "your transcript and paste it into the survey."
 #       )
-WELCOME_MESSAGE = (
-    "You are about to have a short conversation with an AI assistant. "
-    "When you are finished, click <strong>End chat</strong>, then copy and paste your transcript into the survey."
-)
+WELCOME_MESSAGE = ""
 
-# ── Prompt shown on the passcode entry screen (passcode routing only) ──────
+# ── Prompt shown on the passcode entry screen ────────────────────────────────
 #
-#   Displayed above the passcode text box when N > 1 and all conditions define
-#   a "passcode".  Ignored when N = 1.
-PASSCODE_ENTRY_PROMPT = (
-    "Please enter the passcode you received in the survey to begin chatting."
-)
+#   Displayed above the passcode text box whenever all active conditions
+#   define a "passcode".  Ignored when no conditions define a passcode.
+PASSCODE_ENTRY_PROMPT = "Enter your passcode below to start the conversation."
 
 # ── Configuration reference ───────────────────────────────────────────────────
 #
@@ -606,7 +617,8 @@ PASSCODE_ENTRY_PROMPT = (
 #  N_CONDITIONS           2                 1 = survey mode, 2 = A/B test,
 #                                           3+ = multi-arm experiment.
 #  CONDITIONS             [A, B]            List of condition dicts.  Each has
-#                                           "name", optional "passcode",
+#                                           "name", "passcode" (required for
+#                                           N > 1, optional for N = 1),
 #                                           "system_prompt", and "model".
 #  TEMPERATURE            None              Response randomness (0.0–2.0).
 #                                           None = model default (usually 1.0).
@@ -619,18 +631,19 @@ PASSCODE_ENTRY_PROMPT = (
 #  MAX_EXCHANGES          None              Max participant turns before chat
 #                                           auto-ends. None = no limit.
 #  STUDY_TITLE            "surveychat"      Browser tab title and page heading.
-#  WELCOME_MESSAGE        (default string)  Banner shown above the chat.
+#  WELCOME_MESSAGE        ""                Banner shown above the chat.
 #                                           Set to "" to hide.
-#  PASSCODE_ENTRY_PROMPT  (default string)  Text above the passcode box.
-#                                           Only shown in experiment mode.
+#  PASSCODE_ENTRY_PROMPT  (see app)         Text above the passcode box.
+#                                           Shown whenever a passcode is set.
 #  ──────────────────────────────────────────────────────────────────────────────
 #
 #  Routing behaviour summary
 #  ─────────────────────────
-#  N = 1                Survey mode.  No gate, no passcode, direct to chat.
-#  N > 1, no passcode   Random routing.  Condition drawn at random on load.
-#  N > 1, with passcode Passcode routing.  Same passcode → same condition,
-#                       stable across page refreshes.
+#  N = 1, no passcode   Survey mode.  No gate, direct to chat.
+#  N = 1, with passcode Survey mode with gate.  Shared passcode required.
+#  N > 1                Experiment mode.  A unique passcode is required on
+#                       every condition.  Each code maps to exactly one
+#                       condition, stable across page refreshes.
 #
 # ╔═════════════════════════════════════════════════════════════════════════════╗
 # ║  END OF RESEARCHER CONFIGURATION - no edits needed below this line        ║
@@ -694,6 +707,13 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     margin: 0;
 }
 
+/* ── Optional exclusion expander ───────────────────────────────────────────── */
+/* Rendered above the copy button; kept visually quiet so participants
+   focus on copying rather than on the optional exclusion option. */
+[data-testid="stExpander"] details { border: none !important; background: transparent !important; }
+[data-testid="stExpander"] summary { font-size: 0.8rem !important; color: #888 !important; padding-left: 0 !important; }
+[data-testid="stExpander"] summary:hover { color: #555 !important; }
+
 /* ── Welcome / instruction banner ───────────────────────────────────────────── */
 /* Shown above the chat input when WELCOME_MESSAGE is non-empty.  The left
    accent border matches the primary color to tie it to the site palette. */
@@ -702,7 +722,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     border-left: 4px solid #5C6C79;
     border-radius: 0 6px 6px 0;
     padding: 0.75rem 1rem;
-    font-size: 0.9rem;
     color: #1F2429;
     margin-bottom: 1.25rem;
     line-height: 1.55;
@@ -745,10 +764,9 @@ if len(CONDITIONS) < N_CONDITIONS:
     )
     st.stop()
 
-# Validate passcode-routing configuration when N > 1.
+# Validate passcode-routing configuration (covers all modes including N = 1).
 # Full logic is documented in validate_passcode_routing() above.
-if N_CONDITIONS > 1:
-    validate_passcode_routing(CONDITIONS, N_CONDITIONS)
+validate_passcode_routing(CONDITIONS, N_CONDITIONS)
 
 
 # =============================================================================
@@ -766,40 +784,33 @@ if N_CONDITIONS > 1:
 
 # ── Determine routing mode ────────────────────────────────────────────────────
 #
-#  Survey mode      →  N_CONDITIONS = 1.
-#                      No routing step.  Condition index is always 0.
-#                      Participant goes straight to the chat interface.
+#  Survey (no gate) →  N_CONDITIONS = 1, no "passcode" on the condition.
+#                      Condition index is always 0.  Participant goes
+#                      straight to the chat interface.
 #
-#  Passcode routing →  N > 1 AND every active condition defines a "passcode".
-#                      The passcode entry gate is shown before the chat.
-#                      The same passcode always resolves to the same condition
-#                      index, so a participant who refreshes the page and
-#                      re-enters their passcode lands on the same arm -
+#  Passcode routing →  Every active condition defines a "passcode".
+#                      Covers survey mode with a shared gate (N = 1) and
+#                      all experiment mode configurations (N > 1, required).
+#                      The passcode entry screen is shown before the chat.
+#                      The same passcode always maps to the same condition
+#                      index, so routing is stable across page refreshes
 #                      without any server-side session storage.
-#
-#  Random routing   →  N > 1 BUT no conditions define a "passcode".
-#                      Condition is drawn uniformly at random on first load.
-#                      A page refresh draws a new condition, so this mode is
-#                      only appropriate when refresh is unlikely or impossible
-#                      (e.g. the survey platform embeds the link once).
-_passcode_routing = N_CONDITIONS > 1 and all(
+_passcode_routing = all(
     "passcode" in CONDITIONS[i] for i in range(N_CONDITIONS)
 )
 
 # ── Assign condition index ────────────────────────────────────────────────────
 #
-#  For survey/random routing, assign immediately.
+#  For ungated survey mode (N = 1, no passcode), assign immediately.
 #  For passcode routing, defer until the participant enters their passcode;
 #  assignment happens in the passcode-gate block below.
 if not _passcode_routing and "condition_index" not in st.session_state:
-    st.session_state["condition_index"] = (
-        0 if N_CONDITIONS == 1 else random.randint(0, N_CONDITIONS - 1)
-    )
+    st.session_state["condition_index"] = 0  # only reachable for N = 1, no passcode
 
 # ── Per-session flags ─────────────────────────────────────────────────────────
 
 # Whether the passcode gate has been passed.
-# Initialised to True when no gate is needed (survey / random routing).
+# Initialised to True only when no gate is needed (N = 1, no passcode).
 if "passcode_accepted" not in st.session_state:
     st.session_state["passcode_accepted"] = not _passcode_routing
 
@@ -814,6 +825,12 @@ if "chat_ended" not in st.session_state:
 # This prevents accidental chat termination and loss of the conversation.
 if "confirm_end" not in st.session_state:
     st.session_state["confirm_end"] = False
+
+# Flipped to True when the chat ends automatically because MAX_EXCHANGES was
+# reached (as opposed to the participant clicking End chat manually).
+# Used to show a brief completion message at the top of the transcript panel.
+if "auto_ended" not in st.session_state:
+    st.session_state["auto_ended"] = False
 
 # Flipped to True the moment the participant sends their first message.
 # The End button is hidden until this is True to avoid showing a useless
@@ -874,7 +891,7 @@ client = get_client(OPENAI_API_KEY, API_BASE_URL)
 #  on session-state flags set during earlier runs; this drives the multi-step
 #  participant flow:
 #
-#  Stage 1 - Passcode gate  (experiment mode with passcode routing only)
+#  Stage 1 - Passcode gate  (any mode where all conditions define a passcode)
 #    • Displayed when st.session_state["passcode_accepted"] is False.
 #    • A form with a single text input collects the passcode.
 #    • Valid entry maps to a condition index, sets passcode_accepted=True,
@@ -913,7 +930,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Passcode entry (experiment mode with passcode routing only) ─────────────
+# ── Passcode entry (shown whenever all conditions define a passcode) ─────────
 # Shown before the chat until the participant enters a valid passcode.
 # On page refresh the gate reappears, but the same passcode always maps to the
 # same condition, so assignment is stable across refreshes.
@@ -928,13 +945,13 @@ if not st.session_state["passcode_accepted"]:
             unsafe_allow_html=True,
         )
     st.markdown(
-        f'<p style="margin-bottom:1rem;font-size:0.95rem;color:#1F2429">'
+        f'<p style="margin-bottom:1rem;font-size:1rem;color:#1F2429">'
         f'{PASSCODE_ENTRY_PROMPT}</p>',
         unsafe_allow_html=True,
     )
     with st.form("key_form"):
-        _code = st.text_input("Passcode", placeholder="e.g. BETA")
-        _submitted = st.form_submit_button("Continue →", type="primary")
+        _code = st.text_input("Passcode", placeholder="Enter your passcode")
+        _submitted = st.form_submit_button("Start →", type="primary")
     if _submitted:
         _idx = _passcode_map.get(_code.strip().lower())
         if _idx is not None:
@@ -964,7 +981,7 @@ if _initial_msg and not st.session_state["messages"]:
 # ── End Chat button - appears after the first exchange ────────────────────────
 # Placed below the header so it does not compete with the title layout.
 if not st.session_state["chat_ended"] and st.session_state["has_sent_message"]:
-    _, end_col = st.columns([5, 1])
+    _, end_col = st.columns([4, 2])
     with end_col:
         if not st.session_state["confirm_end"]:
             if st.button("End chat", use_container_width=True, type="secondary"):
@@ -972,7 +989,7 @@ if not st.session_state["chat_ended"] and st.session_state["has_sent_message"]:
                 st.rerun()
         else:
             # Second click required to confirm - prevents accidental endings
-            if st.button("✓ Confirm", use_container_width=True, type="primary"):
+            if st.button("✓ Confirm end", use_container_width=True, type="primary"):
                 st.session_state["chat_ended"] = True
                 st.rerun()
 
@@ -1054,7 +1071,7 @@ if not st.session_state["chat_ended"]:
                 if not response:
                     raise RuntimeError(
                         "The model returned an empty response. "
-                        "This may be a rate-limit or temporary API issue — "
+                        "This may be a rate-limit or temporary API issue. "
                         "please wait a moment and try again."
                     )
 
@@ -1087,6 +1104,7 @@ if not st.session_state["chat_ended"]:
             )
             if _user_turns >= MAX_EXCHANGES:
                 st.session_state["chat_ended"] = True
+                st.session_state["auto_ended"] = True
                 st.rerun()
 
         # On the very first user exchange, force a rerun so the End button
@@ -1117,6 +1135,14 @@ if not st.session_state["chat_ended"]:
 #      df   <- as.data.frame(data$messages)   # one row per turn
 #
 else:
+    # Show a brief completion notice when the chat was auto-ended by
+    # MAX_EXCHANGES (as opposed to the participant clicking End chat).
+    if st.session_state.get("auto_ended"):
+        st.info(
+            "The conversation is now complete. "
+            "Please copy your transcript below and paste it into the survey."
+        )
+
     # Collect participant message indices and build transcript first.
     # Checkbox state persists in st.session_state across rerenders, so the
     # JSON is always up-to-date even though the checkboxes render below.
@@ -1140,68 +1166,7 @@ else:
     )
     _js_str = json.dumps(_transcript_json)  # safe JS string literal
 
-    components.html(
-        f"""
-        <style>
-          body {{ margin: 0; font-family: sans-serif; }}
-          #copy-btn {{
-            width: 100%; padding: 0.55rem 1rem;
-            font-size: 1rem; font-weight: 600;
-            background: #ff4b4b; color: white;
-            border: none; border-radius: 0.5rem; cursor: pointer;
-          }}
-          #copy-btn:hover {{ background: #e03535; }}
-          #copy-btn:disabled {{ background: #21c354; cursor: default; }}
-          #fallback {{ display: none; margin-top: 0.75rem; font-size: 0.85rem; color: #555; }}
-          #fallback textarea {{
-            width: 100%; height: 80px; font-size: 0.75rem;
-            font-family: monospace; margin-top: 0.25rem;
-          }}
-        </style>
-        <button id="copy-btn" onclick="copyTranscript(this)">
-          &#10003;&nbsp; Confirm &amp; copy transcript to clipboard
-        </button>
-        <div id="fallback">
-          <p>Automatic copy failed. Select all and copy manually:</p>
-          <textarea id="fallback-ta" readonly></textarea>
-        </div>
-        <script>
-        function copyTranscript(btn) {{
-          const text = {_js_str};
-          function onSuccess() {{
-            btn.textContent = '\u2713 Copied! Paste it into your survey.';
-            btn.disabled = true;
-          }}
-          function onFail() {{
-            btn.style.display = 'none';
-            var fb = document.getElementById('fallback');
-            var ta = document.getElementById('fallback-ta');
-            ta.value = text;
-            fb.style.display = 'block';
-            ta.focus(); ta.select();
-          }}
-          if (navigator.clipboard && window.isSecureContext) {{
-            navigator.clipboard.writeText(text).then(onSuccess, onFail);
-          }} else {{
-            try {{
-              var ta2 = document.createElement('textarea');
-              ta2.value = text;
-              ta2.style.cssText = 'position:fixed;left:-9999px';
-              document.body.appendChild(ta2);
-              ta2.focus(); ta2.select();
-              document.execCommand('copy');
-              document.body.removeChild(ta2);
-              onSuccess();
-            }} catch(e) {{ onFail(); }}
-          }}
-        }}
-        </script>
-        """,
-        height=60,
-        scrolling=False,
-    )
-
-    with st.expander("Want to exclude a message before sharing? (optional)"):
+    with st.expander("Optional: exclude a message before sharing"):
         st.caption(
             "Uncheck any messages you'd prefer not to share."
         )
@@ -1222,6 +1187,68 @@ else:
                         st.markdown(_msg["content"])
                     else:
                         st.markdown(f"~~{_msg['content']}~~")
+
+    st.html(
+        f"""
+        <style>
+          #copy-btn {{
+            width: 100%; padding: 0.55rem 1rem;
+            font-size: 1rem; font-weight: 600;
+            background: #ff4b4b; color: white;
+            border: none; border-radius: 0.5rem; cursor: pointer;
+          }}
+          #copy-btn:hover {{ background: #e03535; }}
+          #copy-btn:disabled {{ background: #21c354; cursor: default; }}
+          #fallback {{ display: none; margin-top: 0.75rem; font-size: 0.85rem; color: #555; }}
+          #fallback textarea {{
+            width: 100%; height: 80px; font-size: 0.75rem;
+            font-family: monospace; margin-top: 0.25rem;
+          }}
+        </style>
+        <button id="copy-btn">
+          &#10003;&nbsp; Copy your conversation transcript
+        </button>
+        <div id="fallback">
+          <p>Automatic copy failed. Select all and copy manually:</p>
+          <textarea id="fallback-ta" readonly></textarea>
+        </div>
+        <script>
+        (function() {{
+          var btn = document.getElementById('copy-btn');
+          var fb = document.getElementById('fallback');
+          var ta = document.getElementById('fallback-ta');
+          var text = {_js_str};
+          btn.addEventListener('click', function() {{
+            function onSuccess() {{
+              btn.textContent = '\u2713 Copied! Paste it in the below question to proceed.';
+              btn.disabled = true;
+            }}
+            function onFail() {{
+              btn.style.display = 'none';
+              ta.value = text;
+              fb.style.display = 'block';
+              ta.focus(); ta.select();
+            }}
+            if (navigator.clipboard && window.isSecureContext) {{
+              navigator.clipboard.writeText(text).then(onSuccess, onFail);
+            }} else {{
+              try {{
+                var ta2 = document.createElement('textarea');
+                ta2.value = text;
+                ta2.style.cssText = 'position:fixed;left:-9999px';
+                document.body.appendChild(ta2);
+                ta2.focus(); ta2.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta2);
+                onSuccess();
+              }} catch(e) {{ onFail(); }}
+            }}
+          }});
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
 
 
 # =============================================================================
@@ -1265,10 +1292,8 @@ else:
 #  ----------------------------------------
 #  Condition identity is NOT in the transcript.  Recover it from the survey
 #  branching logic:
-#    - In passcode routing: store the passcode shown to each participant in
-#      a Qualtrics embedded data field.  Map passcode → condition name in R/Python.
-#    - In random routing:   store the displayed arm label in an embedded data
-#      field in the Qualtrics Survey Flow randomizer branch.
+#    - Store the passcode shown to each participant in a Qualtrics embedded
+#      data field.  Map passcode → condition name in R/Python during analysis.
 #
 #  DATA QUALITY CHECKS
 #  --------------------
