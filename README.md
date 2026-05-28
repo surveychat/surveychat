@@ -168,7 +168,7 @@ In your Qualtrics survey, add a **Text / Graphic** block and paste this HTML (re
 ```html
 <p>Chat with the assistant below. When you're done, click <strong>End chat</strong> to get a button to copy your transcript.</p>
 <div style="border: 1px solid #d4d4d4; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin: 16px 0;">
-  <iframe src="https://your.app.url/" width="100%" height="700" style="display: block; border: none;"></iframe>
+  <iframe src="https://your.app.url/" width="100%" height="700" style="display: block; border: none;" allow="clipboard-write"></iframe>
 </div>
 ```
 
@@ -184,7 +184,7 @@ In **Survey Flow → Randomizer**, create one branch per condition. In each bran
 <br>
 <p>Enter your assigned passcode in the chatbot below to start. When you want to finish speaking, click <strong>End chat</strong>, and you will be shown a button to copy your conversation transcript.</p>
 <div style="border: 1px solid #d4d4d4; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin: 16px 0;">
-  <iframe src="https://your.app.url/" width="100%" height="700" style="display: block; border: none;"></iframe>
+  <iframe src="https://your.app.url/" width="100%" height="700" style="display: block; border: none;" allow="clipboard-write"></iframe>
 </div>
 ```
 
