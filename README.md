@@ -142,6 +142,11 @@ Parse in **R:**
 df <- as.data.frame(jsonlite::fromJSON(transcript_string)$messages)
 ```
 
+For beginner-friendly analysis templates, see:
+
+- [Python/pandas notebook](analysis/python_pandas_qualtrics_json.ipynb)
+- [R/tidyverse R Markdown file](analysis/r_tidyverse_qualtrics_json.Rmd)
+
 ---
 
 ## Deployment
@@ -202,4 +207,3 @@ In both modes, add a **Text Entry** question after the chatbot block: *"After yo
 | The page doesn't load | Go to http://localhost:8501 directly. If it says "connection refused", the app may have crashed. Check the terminal window for error messages. |
 | Port 8501 already in use | Run `pkill -f "streamlit run"` to stop any existing instance, or start on a different port: `streamlit run app.py --server.port 8502` |
 | You edited `app.py` but nothing changed | Streamlit usually reloads automatically. If it doesn't, press **R** in the terminal, or stop and restart with `streamlit run app.py`. |
-

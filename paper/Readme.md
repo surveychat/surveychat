@@ -1,3 +1,3 @@
-# Folder for academic article
+# Working paper
 
-This folder contains image files for the academic article related to this project.
+Our working paper describing `surveychat` in more detail <a href="https://doi.org/10.31235/osf.io/hp2mu_v1" target="_blank" rel="noopener noreferrer">can be read here</a>.

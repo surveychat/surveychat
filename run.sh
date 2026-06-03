@@ -1,6 +1,11 @@
-streamlit run --browser.serverAddress $SERVER_NAME --server.port $PORT app.py
+#!/usr/bin/env bash
+set -euo pipefail
 
-# #!/usr/bin/env bash
-# # Convenience script for testing on AWS EC2 or similar platforms, where you may not have Streamlit installed globally and/or want to specify the server address and port via environment variables.
+# Convenience script for local testing or simple servers.
+# Override these with environment variables if needed.
+SERVER_NAME="${SERVER_NAME:-localhost}"
+PORT="${PORT:-8501}"
 
-# streamlit run app.py
+streamlit run app.py \
+  --browser.serverAddress "$SERVER_NAME" \
+  --server.port "$PORT"

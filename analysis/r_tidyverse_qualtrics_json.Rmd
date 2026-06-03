@@ -1,0 +1,175 @@
+---
+title: "Analyze surveychat transcripts with R"
+output: html_document
+---
+
+## Goal
+
+This short example reads a Qualtrics CSV file and turns the surveychat JSON
+transcript column into a table with one row per chat message.
+
+Only edit the two lines in the first code block: the CSV file name and the
+column that contains the JSON transcript.
+
+```{r setup}
+library(tidyverse)
+library(jsonlite)
+```
+
+## 1. Read the CSV
+
+```{r read-csv}
+# Edit these two lines.
+csv_file <- "qualtrics_export.csv"
+json_column <- "chat_transcript"
+
+responses <- read_csv(csv_file, show_col_types = FALSE)
+
+if (!json_column %in% names(responses)) {
+  stop(
+    "Column not found. Check json_column. Available columns are: ",
+    str_c(names(responses), collapse = ", ")
+  )
+}
+
+transcripts <- responses %>%
+  mutate(
+    response_number = row_number(),
+    transcript_json = as.character(.data[[json_column]])
+  ) %>%
+  filter(!is.na(transcript_json), str_trim(transcript_json) != "")
+```
+
+## 2. Parse the JSON transcripts
+
+```{r parse-json}
+# This is just a small check. Rows listed here are not valid JSON.
+is_valid_json <- function(transcript_json) {
+  tryCatch(
+    {
+      fromJSON(transcript_json)
+      TRUE
+    },
+    error = function(e) FALSE
+  )
+}
+
+malformed_json <- transcripts %>%
+  filter(!map_lgl(transcript_json, is_valid_json))
+
+parse_messages <- function(transcript_json, response_number) {
+  tryCatch(
+    {
+      parsed <- fromJSON(transcript_json)
+
+      if (!"messages" %in% names(parsed) || length(parsed$messages) == 0) {
+        return(tibble())
+      }
+
+      as_tibble(parsed$messages) %>%
+        mutate(
+          response_number = response_number,
+          turn_number = row_number(),
+          .before = 1
+        )
+    },
+    error = function(e) tibble()
+  )
+}
+
+messages <- map2_dfr(
+  transcripts$transcript_json,
+  transcripts$response_number,
+  parse_messages
+)
+
+if (nrow(messages) == 0) {
+  stop("No messages were parsed. Check csv_file and json_column.")
+}
+
+messages <- messages %>%
+  mutate(
+    role = as.character(role),
+    content = replace_na(as.character(content), ""),
+    timestamp = parse_datetime(timestamp),
+    word_count = if_else(
+      content == "",
+      0L,
+      str_count(str_squish(content), "\\S+")
+    )
+  )
+
+messages
+```
+
+## 3. Simple conversation metrics
+
+```{r conversation-summary}
+conversation_summary <- messages %>%
+  group_by(response_number) %>%
+  summarise(
+    n_turns = n(),
+    participant_turns = sum(role == "participant", na.rm = TRUE),
+    assistant_turns = sum(role == "assistant", na.rm = TRUE),
+    participant_words = sum(
+      if_else(role == "participant", word_count, 0L),
+      na.rm = TRUE
+    ),
+    assistant_words = sum(
+      if_else(role == "assistant", word_count, 0L),
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+conversation_summary
+```
+
+```{r role-summary}
+role_summary <- messages %>%
+  group_by(role) %>%
+  summarise(
+    n_messages = n(),
+    mean_words = mean(word_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+role_summary
+```
+
+## 4. Simple text example
+
+This combines all participant messages from each response. You can use this
+table for hand coding, keyword checks, or later text analysis.
+
+```{r participant-text}
+participant_text <- messages %>%
+  filter(role == "participant") %>%
+  group_by(response_number) %>%
+  summarise(
+    participant_text = str_c(content, collapse = " "),
+    .groups = "drop"
+  )
+
+participant_text
+```
+
+```{r keyword-example}
+# Change this word to match your research question.
+keyword <- "trust"
+
+keyword_summary <- participant_text %>%
+  mutate(
+    mentions_keyword = str_detect(
+      str_to_lower(participant_text),
+      str_to_lower(keyword)
+    )
+  ) %>%
+  summarise(
+    n_responses = n(),
+    responses_mentioning_keyword = sum(mentions_keyword),
+    percent_mentioning_keyword = mean(mentions_keyword) * 100
+  )
+
+keyword_summary
+```

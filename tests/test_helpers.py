@@ -230,3 +230,46 @@ class TestBuildTranscript:
             assert "condition" not in msg
             assert "model" not in msg
 
+
+# ===========================================================================
+#  mask_unshared_messages
+# ===========================================================================
+
+class TestMaskUnsharedMessages:
+    """Tests for mask_unshared_messages(messages, unshared_indices)."""
+
+    def test_unshared_participant_message_is_redacted(self):
+        messages = [
+            {"role": "user", "content": "Private detail", "timestamp": "t1"},
+        ]
+        result = app.mask_unshared_messages(messages, {0})
+        assert result[0]["content"] == "Message unshared by participant"
+
+    def test_following_assistant_reply_is_redacted(self):
+        messages = [
+            {"role": "user", "content": "Private detail", "timestamp": "t1"},
+            {"role": "assistant", "content": "You said private detail.", "timestamp": "t2"},
+        ]
+        result = app.mask_unshared_messages(messages, {0})
+        assert (
+            result[1]["content"]
+            == "Assistant response hidden because the previous participant message was unshared"
+        )
+
+    def test_later_messages_are_preserved(self):
+        messages = [
+            {"role": "user", "content": "Private detail", "timestamp": "t1"},
+            {"role": "assistant", "content": "You said private detail.", "timestamp": "t2"},
+            {"role": "user", "content": "Share this", "timestamp": "t3"},
+        ]
+        result = app.mask_unshared_messages(messages, {0})
+        assert result[2]["content"] == "Share this"
+
+    def test_original_messages_are_not_mutated(self):
+        messages = [
+            {"role": "user", "content": "Private detail", "timestamp": "t1"},
+            {"role": "assistant", "content": "You said private detail.", "timestamp": "t2"},
+        ]
+        app.mask_unshared_messages(messages, {0})
+        assert messages[0]["content"] == "Private detail"
+        assert messages[1]["content"] == "You said private detail."

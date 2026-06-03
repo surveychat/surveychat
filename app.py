@@ -142,169 +142,6 @@ from dotenv import load_dotenv          # reads .env into os.environ automatical
 load_dotenv(override=True)
 
 
-# =============================================================================
-#  HELPER FUNCTIONS
-# =============================================================================
-#
-#  Three helper functions used by the main interface below:
-#
-#  validate_passcode_routing(conditions, n_conditions)
-#    Checks that the passcode configuration is internally consistent and
-#    halts the app with an actionable error message if not.  Called during
-#    the configuration-validation phase, before any participant-facing UI
-#    is rendered.
-#
-#  build_api_messages(conversation, system_prompt)
-#    Constructs the full message list sent to the LLM API for each turn,
-#    prepending the hidden system prompt at position 0.
-#
-#  build_transcript(messages)
-#    Formats the conversation history as the JSON transcript object shown
-#    to the participant at the end of the session.
-
-def validate_passcode_routing(conditions: list, n_conditions: int) -> None:
-    """
-    Check passcode-routing configuration and halt the app on any inconsistency.
-
-    Enforces three invariants:
-      1. In experiment mode (n_conditions > 1), every active condition must
-         define a "passcode" field.  Partial configuration (some but not
-         all conditions have a passcode) is also rejected in any mode.
-      2. Every passcode value must be a non-empty string after stripping
-         leading and trailing whitespace.
-      3. All passcodes must be unique when compared case-insensitively.
-
-    Any violation triggers a descriptive on-screen error via st.error() and
-    stops execution with st.stop(), so researchers see the problem
-    immediately rather than discovering it mid-study.
-
-    Parameters
-    ----------
-    conditions : list[dict]
-        The full CONDITIONS list from the researcher configuration section.
-    n_conditions : int
-        The N_CONDITIONS value.  Only the first n_conditions entries are
-        considered active; any extras are ignored.
-    """
-    active    = conditions[:n_conditions]
-    passcoded = [c for c in active if "passcode" in c]
-
-    # Invariant 1a: Experiment mode requires a passcode on every condition.
-    # Participants must be traceable to a known arm, so random routing is
-    # not supported when N > 1.
-    if n_conditions > 1 and len(passcoded) == 0:
-        st.error(
-            f"Experiment mode requires a `\"passcode\"` on every condition, "
-            f"but none of the **{n_conditions}** active conditions define one. "
-            "Add a unique passcode to each condition in the CONDITIONS list."
-        )
-        st.stop()
-
-    # Invariant 1b: Partial configuration is always an error.
-    # Either every active condition has a passcode or none do.
-    if 0 < len(passcoded) < n_conditions:
-        st.error(
-            f"Passcode configuration is incomplete: **{len(passcoded)}** of "
-            f"**{n_conditions}** active conditions have a `\"passcode\"` field. "
-            "Every active condition must have a passcode."
-        )
-        st.stop()
-
-    if len(passcoded) == n_conditions:
-        # Invariant 2: No blank passcode strings.
-        if any(not c["passcode"].strip() for c in active):
-            st.error(
-                "One or more condition `\"passcode\"` values are empty strings. "
-                "Every passcode must contain at least one character."
-            )
-            st.stop()
-
-        # Invariant 3: All passcodes must be unique (case-insensitive).
-        passcodes = [c["passcode"].strip().lower() for c in active]
-        if len(passcodes) != len(set(passcodes)):
-            st.error(
-                "Two or more conditions share the same `\"passcode\"` value. "
-                "Every condition must have a unique passcode."
-            )
-            st.stop()
-
-
-def build_api_messages(conversation: list, system_prompt: str) -> list:
-    """
-    Construct the message list to send to the LLM API for a single turn.
-
-    The system prompt is inserted as a {"role": "system"} message at
-    position 0.  Participants never see this text, but it defines the
-    model's entire persona and behavioral instructions for the conversation.
-
-    Only "role" and "content" are forwarded from the conversation history.
-    The "timestamp" key is local-only metadata that the chat completions API
-    does not accept and would cause a validation error if included.
-
-    Parameters
-    ----------
-    conversation : list[dict]
-        The current value of st.session_state["messages"].  Each element
-        has "role", "content", and "timestamp".
-    system_prompt : str
-        The hidden system prompt from the active condition dict.
-
-    Returns
-    -------
-    list[dict]
-        A list of {"role": str, "content": str} dicts ready for the chat
-        completions endpoint.
-    """
-    messages = [{"role": "system", "content": system_prompt}]
-    for m in conversation:
-        messages.append({"role": m["role"], "content": m["content"]})
-    return messages
-
-
-
-
-def build_transcript(messages: list) -> dict:
-    """
-    Format the conversation history as the transcript object shown after chat ends.
-
-    Returns a JSON-serialisable dict with a single "messages" key.  Each
-    entry carries:
-      - "role"      : "participant" (relabelled from "user") or "assistant"
-      - "content"   : the full text of the message
-      - "timestamp" : UTC ISO-8601 string, e.g. "2026-03-06T14:22:01+00:00"
-
-    Design notes:
-      - "user" is relabelled "participant" so researchers get a domain-
-        appropriate label when parsing the transcript in Python or R.
-      - Condition name and model are intentionally excluded.  In experiment
-        mode, participants must not be able to infer their assigned condition
-        from the transcript they read and manually copy back into the survey.
-        Treatment assignment is recovered separately from the passcode stored
-        in the survey platform's response data.
-      - In survey mode (N_CONDITIONS = 1) there is only one condition, so
-        excluding the name is a no-op, but it keeps the transcript format
-        identical across both modes.
-
-    Parameters
-    ----------
-    messages : list[dict]
-        The current value of st.session_state["messages"].
-
-    Returns
-    -------
-    dict
-        Transcript object suitable for json.dumps(indent=2, ensure_ascii=False).
-    """
-    entries = []
-    for m in messages:
-        entries.append({
-            "role":      "participant" if m["role"] == "user" else "assistant",
-            "content":   m["content"],
-            "timestamp": m.get("timestamp", ""),
-        })
-    return {"messages": entries}
-
-
 # ╔═════════════════════════════════════════════════════════════════════════════╗
 # ║  ✏️  RESEARCHER CONFIGURATION - edit this section to set up your study    ║
 # ╚═════════════════════════════════════════════════════════════════════════════╝
@@ -457,7 +294,7 @@ N_CONDITIONS = 2
 #              "After 5-7 exchanges, thank the participant warmly and let "
 #              "them know they can click End chat."
 #          ),
-#          "model": "gpt-oss-120b",
+#          "model": "gpt-4o",
 #      },
 #  ]
 
@@ -478,7 +315,7 @@ CONDITIONS = [
             "its factual content and do not comment on the emotional dimension. "
             "Keep every response to two or three sentences. Be direct and concise."
         ),
-        "model": "gpt-oss-120b",
+        "model": "gpt-4o",
         "initial_message": "Hello. I'm here to assist you as part of this study. What would you like to discuss?",
     },
 
@@ -500,7 +337,7 @@ CONDITIONS = [
             "the participant to share more. "
             "Never sound clinical, detached, or bureaucratic."
         ),
-        "model": "gpt-oss-120b",
+        "model": "gpt-4o",
         "initial_message": "Hello! I'm really glad you're here. This is a space where you can share whatever's on your mind. What would you like to talk about today?",
     },
 
@@ -648,6 +485,206 @@ PASSCODE_ENTRY_PROMPT = "Enter your passcode below to start the conversation."
 # ╔═════════════════════════════════════════════════════════════════════════════╗
 # ║  END OF RESEARCHER CONFIGURATION - no edits needed below this line        ║
 # ╚═════════════════════════════════════════════════════════════════════════════╝
+
+
+# =============================================================================
+#  HELPER FUNCTIONS
+# =============================================================================
+#
+#  Four helper functions used by the main interface below:
+#
+#  validate_passcode_routing(conditions, n_conditions)
+#    Checks that the passcode configuration is internally consistent and
+#    halts the app with an actionable error message if not.  Called during
+#    the configuration-validation phase, before any participant-facing UI
+#    is rendered.
+#
+#  build_api_messages(conversation, system_prompt)
+#    Constructs the full message list sent to the LLM API for each turn,
+#    prepending the hidden system prompt at position 0.
+#
+#  build_transcript(messages)
+#    Formats the conversation history as the JSON transcript object shown
+#    to the participant at the end of the session.
+#
+#  mask_unshared_messages(messages, unshared_indices)
+#    Redacts participant-selected messages before transcript export, along
+#    with the next assistant reply because it may quote or summarize the
+#    hidden participant text.
+
+def validate_passcode_routing(conditions: list, n_conditions: int) -> None:
+    """
+    Check passcode-routing configuration and halt the app on any inconsistency.
+
+    Enforces three invariants:
+      1. In experiment mode (n_conditions > 1), every active condition must
+         define a "passcode" field.  Partial configuration (some but not
+         all conditions have a passcode) is also rejected in any mode.
+      2. Every passcode value must be a non-empty string after stripping
+         leading and trailing whitespace.
+      3. All passcodes must be unique when compared case-insensitively.
+
+    Any violation triggers a descriptive on-screen error via st.error() and
+    stops execution with st.stop(), so researchers see the problem
+    immediately rather than discovering it mid-study.
+
+    Parameters
+    ----------
+    conditions : list[dict]
+        The full CONDITIONS list from the researcher configuration section.
+    n_conditions : int
+        The N_CONDITIONS value.  Only the first n_conditions entries are
+        considered active; any extras are ignored.
+    """
+    active    = conditions[:n_conditions]
+    passcoded = [c for c in active if "passcode" in c]
+
+    # Invariant 1a: Experiment mode requires a passcode on every condition.
+    # Participants must be traceable to a known arm, so random routing is
+    # not supported when N > 1.
+    if n_conditions > 1 and len(passcoded) == 0:
+        st.error(
+            f"Experiment mode requires a `\"passcode\"` on every condition, "
+            f"but none of the **{n_conditions}** active conditions define one. "
+            "Add a unique passcode to each condition in the CONDITIONS list."
+        )
+        st.stop()
+
+    # Invariant 1b: Partial configuration is always an error.
+    # Either every active condition has a passcode or none do.
+    if 0 < len(passcoded) < n_conditions:
+        st.error(
+            f"Passcode configuration is incomplete: **{len(passcoded)}** of "
+            f"**{n_conditions}** active conditions have a `\"passcode\"` field. "
+            "Every active condition must have a passcode."
+        )
+        st.stop()
+
+    if len(passcoded) == n_conditions:
+        # Invariant 2: No blank passcode strings.
+        if any(not c["passcode"].strip() for c in active):
+            st.error(
+                "One or more condition `\"passcode\"` values are empty strings. "
+                "Every passcode must contain at least one character."
+            )
+            st.stop()
+
+        # Invariant 3: All passcodes must be unique (case-insensitive).
+        passcodes = [c["passcode"].strip().lower() for c in active]
+        if len(passcodes) != len(set(passcodes)):
+            st.error(
+                "Two or more conditions share the same `\"passcode\"` value. "
+                "Every condition must have a unique passcode."
+            )
+            st.stop()
+
+
+def build_api_messages(conversation: list, system_prompt: str) -> list:
+    """
+    Construct the message list to send to the LLM API for a single turn.
+
+    The system prompt is inserted as a {"role": "system"} message at
+    position 0.  Participants never see this text, but it defines the
+    model's entire persona and behavioral instructions for the conversation.
+
+    Only "role" and "content" are forwarded from the conversation history.
+    The "timestamp" key is local-only metadata that the chat completions API
+    does not accept and would cause a validation error if included.
+
+    Parameters
+    ----------
+    conversation : list[dict]
+        The current value of st.session_state["messages"].  Each element
+        has "role", "content", and "timestamp".
+    system_prompt : str
+        The hidden system prompt from the active condition dict.
+
+    Returns
+    -------
+    list[dict]
+        A list of {"role": str, "content": str} dicts ready for the chat
+        completions endpoint.
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in conversation:
+        messages.append({"role": m["role"], "content": m["content"]})
+    return messages
+
+
+def build_transcript(messages: list) -> dict:
+    """
+    Format the conversation history as the transcript object shown after chat ends.
+
+    Returns a JSON-serialisable dict with a single "messages" key.  Each
+    entry carries:
+      - "role"      : "participant" (relabelled from "user") or "assistant"
+      - "content"   : the full text of the message
+      - "timestamp" : UTC ISO-8601 string, e.g. "2026-03-06T14:22:01+00:00"
+
+    Design notes:
+      - "user" is relabelled "participant" so researchers get a domain-
+        appropriate label when parsing the transcript in Python or R.
+      - Condition name and model are intentionally excluded.  In experiment
+        mode, participants must not be able to infer their assigned condition
+        from the transcript they read and manually copy back into the survey.
+        Treatment assignment is recovered separately from the passcode stored
+        in the survey platform's response data.
+      - In survey mode (N_CONDITIONS = 1) there is only one condition, so
+        excluding the name is a no-op, but it keeps the transcript format
+        identical across both modes.
+
+    Parameters
+    ----------
+    messages : list[dict]
+        The current value of st.session_state["messages"].
+
+    Returns
+    -------
+    dict
+        Transcript object suitable for json.dumps(indent=2, ensure_ascii=False).
+    """
+    entries = []
+    for m in messages:
+        entries.append({
+            "role":      "participant" if m["role"] == "user" else "assistant",
+            "content":   m["content"],
+            "timestamp": m.get("timestamp", ""),
+        })
+    return {"messages": entries}
+
+
+def mask_unshared_messages(messages: list, unshared_indices: set[int]) -> list:
+    """
+    Redact participant-selected messages before transcript export.
+
+    If a participant hides one of their own messages, also hide the
+    immediately following assistant reply. Assistant replies often quote,
+    summarize, or directly answer the previous participant turn, so leaving
+    them visible could accidentally reveal the message the participant chose
+    not to share.
+    """
+    hidden_assistant_indices = set()
+    for idx in unshared_indices:
+        next_idx = idx + 1
+        if (
+            next_idx < len(messages)
+            and messages[next_idx].get("role") == "assistant"
+        ):
+            hidden_assistant_indices.add(next_idx)
+
+    masked_messages = []
+    for idx, message in enumerate(messages):
+        masked = dict(message)
+        if idx in unshared_indices:
+            masked["content"] = "Message unshared by participant"
+        elif idx in hidden_assistant_indices:
+            masked["content"] = (
+                "Assistant response hidden because the previous participant "
+                "message was unshared"
+            )
+        masked_messages.append(masked)
+
+    return masked_messages
 
 
 # =============================================================================
@@ -1072,7 +1109,7 @@ if not st.session_state["chat_ended"]:
                     raise RuntimeError(
                         "The model returned an empty response. "
                         "This may be a rate-limit or temporary API issue. "
-                        "please wait a moment and try again."
+                        "Please wait a moment and try again."
                     )
 
             except Exception as e:
@@ -1157,18 +1194,21 @@ else:
         _i for _i in _participant_indices
         if not st.session_state.get(f"share_msg_{_i}", True)
     }
-    _msgs_for_transcript = [
-        {**m, "content": "Message unshared by participant"} if idx in _unshared else m
-        for idx, m in enumerate(st.session_state["messages"])
-    ]
+    _msgs_for_transcript = mask_unshared_messages(
+        st.session_state["messages"],
+        _unshared,
+    )
     _transcript_json = json.dumps(
         build_transcript(_msgs_for_transcript), indent=2, ensure_ascii=False
     )
-    _js_str = json.dumps(_transcript_json)  # safe JS string literal
+    # Safe JS string literal. Escape closing script sequences because
+    # participant-entered text can appear inside the JSON transcript.
+    _js_str = json.dumps(_transcript_json).replace("</", "<\\/")
 
     with st.expander("Optional: exclude a message before sharing"):
         st.caption(
-            "Uncheck any messages you'd prefer not to share."
+            "Uncheck any messages you'd prefer not to share. "
+            "The next assistant reply will be hidden too."
         )
         for _i in _participant_indices:
             _msg = st.session_state["messages"][_i]

@@ -22,6 +22,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Needed by the Docker HEALTHCHECK below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first so this layer is cached unless requirements.txt
 # changes - speeds up rebuilds during development.
 COPY requirements.txt .
