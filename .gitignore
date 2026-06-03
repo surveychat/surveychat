@@ -205,3 +205,5 @@ paper/paper.md
 paper/paper.bib
 overleaf/
 slides/
+.Rproj.user
+*.Rproj
