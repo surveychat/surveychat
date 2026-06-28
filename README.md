@@ -95,7 +95,7 @@ CONDITIONS = [
 
 | Setting | Default | What it does |
 |---|---|---|
-| `API_BASE_URL` | OpenAI | The web address of the AI service you are using. Change this if you use a different provider (see table below). |
+| `API_BASE_URL` | UvA LLM proxy | The web address of the AI service you are using. The repository ships with the University of Amsterdam LLM proxy as the default; change it to your own provider (see table below), for example `"https://api.openai.com/v1"` for OpenAI. |
 | `TEMPERATURE` | Model default | How varied the chatbot's replies are. `0` = very consistent, `1` = more natural variation. Leave as `None` to use the AI provider's default. |
 | `MAX_TOKENS` | No limit | Maximum length of each chatbot reply. Set a number (e.g. `512`) to keep replies concise and control costs. |
 | `MAX_EXCHANGES` | No limit | Maximum number of messages a participant can send. When this limit is reached, the message box is disabled and the participant is asked to click **End chat** to finish and copy their transcript. Set e.g. `6` for a fixed-length interview. |

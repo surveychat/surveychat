@@ -148,8 +148,13 @@ load_dotenv(override=True)
 
 # ── LLM API settings ──────────────────────────────────────────────────────────
 #
-#  API_BASE_URL  The base URL for your LLM API endpoint.
-#                - OpenAI (default):
+#  API_BASE_URL  The base URL for your LLM API endpoint.  This repository
+#                ships with the University of Amsterdam LLM proxy as the
+#                default; if you are not at the UvA, change it to your own
+#                provider from the list below.
+#                - University of Amsterdam LLM proxy (the shipped default):
+#                    "https://llmproxy.uva.nl/v1"
+#                - OpenAI:
 #                    "https://api.openai.com/v1"
 #                - OpenRouter (access Claude, Gemini, Llama, Mistral, Groq,
 #                  and 300+ models with one API key):
@@ -471,7 +476,7 @@ END_CHAT_BUTTON_BELOW = True
 #
 #  Variable               Default           Description
 #  ──────────────────────────────────────────────────────────────────────────────
-#  API_BASE_URL           (OpenAI URL)      Base URL for the LLM API endpoint.
+#  API_BASE_URL           (UvA proxy URL)   Base URL for the LLM API endpoint.
 #  N_CONDITIONS           2                 1 = survey mode, 2 = A/B test,
 #                                           3+ = multi-arm experiment.
 #  CONDITIONS             [A, B]            List of condition dicts.  Each has
