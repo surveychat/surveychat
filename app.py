@@ -178,7 +178,7 @@ load_dotenv(override=True)
 #
 #  The API key is read from OPENAI_API_KEY in the .env file - do not paste
 #  keys directly here.  For OpenRouter, use your OpenRouter key here.
-API_BASE_URL = "https://llmproxy.uva.nl/v1"
+API_BASE_URL = "https://llmproxy.uva.nl/v1"   # e.g. "https://api.openai.com/v1" or "https://openrouter.ai/api/v1"
 
 # ── How many chatbot conditions does your study have? ─────────────────────────
 #
@@ -389,10 +389,14 @@ TEMPERATURE = None   # e.g. 0.8, or None to use the model's default
 #               for most survey/interview use cases.
 MAX_TOKENS = None    # e.g. 512, or None for no cap
 
-#  MAX_EXCHANGES  Hard limit on the number of participant turns.
+#  MAX_EXCHANGES  Soft limit on the number of participant turns.
 #                 When the participant sends their Nth message, the assistant
-#                 replies as normal, and the transcript is then shown
-#                 automatically - no "End chat" click required.
+#                 replies as normal; the message box is then disabled and a
+#                 short notice asks the participant to click "End chat" to
+#                 finish and copy their transcript.  The transcript is NOT
+#                 shown automatically - the participant always exits through
+#                 the same "End chat" button, so the flow is identical whether
+#                 they stop early or hit the cap.
 #                 Set to None for no limit (participant ends manually).
 #                 Recommended for standardised interview protocols where all
 #                 participants should receive the same number of exchanges.
@@ -446,6 +450,23 @@ WELCOME_MESSAGE = ""
 #   define a "passcode".  Ignored when no conditions define a passcode.
 PASSCODE_ENTRY_PROMPT = "Enter your passcode below to start the conversation."
 
+# ── Chat layout: where the "End chat" button sits ─────────────────────────────
+#
+#   END_CHAT_BUTTON_BELOW
+#     True  (default) - The whole chat (welcome banner, conversation history,
+#             and message box) is wrapped in ONE bordered container, and the
+#             "End chat" button is rendered directly BELOW that container. This
+#             keeps the chat as a single, self-contained component - which sits
+#             cleanly inside a Qualtrics iFrame - with the End control right
+#             where the participant finishes reading. Relies on st.chat_input
+#             rendering inline when nested in a container (Streamlit >= 1.54,
+#             already required here).
+#     False - Fallback placement: a small "End chat" button in the top-right,
+#             above the conversation, with the default bottom-docked message
+#             box. Switch to this if the container layout renders oddly in your
+#             Streamlit build.
+END_CHAT_BUTTON_BELOW = True
+
 # ── Configuration reference ───────────────────────────────────────────────────
 #
 #  Variable               Default           Description
@@ -465,13 +486,18 @@ PASSCODE_ENTRY_PROMPT = "Enter your passcode below to start the conversation."
 #                                           None = no cap.
 #                                           Override per-condition with
 #                                           "max_tokens" in condition dict.
-#  MAX_EXCHANGES          None              Max participant turns before chat
-#                                           auto-ends. None = no limit.
+#  MAX_EXCHANGES          None              Soft cap on participant turns. At the
+#                                           cap the box is disabled and the
+#                                           participant is asked to click End
+#                                           chat. None = no limit.
 #  STUDY_TITLE            "surveychat"      Browser tab title and page heading.
 #  WELCOME_MESSAGE        ""                Banner shown above the chat.
 #                                           Set to "" to hide.
 #  PASSCODE_ENTRY_PROMPT  (see app)         Text above the passcode box.
 #                                           Shown whenever a passcode is set.
+#  END_CHAT_BUTTON_BELOW  True              True = chat in one bordered box with
+#                                           End chat below it; False = End chat
+#                                           top-right, docked message box.
 #  ──────────────────────────────────────────────────────────────────────────────
 #
 #  Routing behaviour summary
@@ -863,11 +889,12 @@ if "chat_ended" not in st.session_state:
 if "confirm_end" not in st.session_state:
     st.session_state["confirm_end"] = False
 
-# Flipped to True when the chat ends automatically because MAX_EXCHANGES was
-# reached (as opposed to the participant clicking End chat manually).
-# Used to show a brief completion message at the top of the transcript panel.
-if "auto_ended" not in st.session_state:
-    st.session_state["auto_ended"] = False
+# Flipped to True when MAX_EXCHANGES participant messages have been reached.
+# Disables the message box and shows a short notice asking the participant to
+# click "End chat" to finish. The transcript is NOT shown automatically - the
+# participant always exits through the End chat button (see MAX_EXCHANGES).
+if "limit_reached" not in st.session_state:
+    st.session_state["limit_reached"] = False
 
 # Flipped to True the moment the participant sends their first message.
 # The End button is hidden until this is True to avoid showing a useless
@@ -919,6 +946,101 @@ def get_client(api_key: str, base_url: str) -> OpenAI:
 client = get_client(OPENAI_API_KEY, API_BASE_URL)
 
 
+def generate_reply(active_condition: dict):
+    """
+    Stream the assistant's reply to the latest participant message into its own
+    chat bubble and store it in the conversation history.
+
+    The bubble opens at the current render position, so the caller controls
+    where the reply appears simply by calling this inside the container it
+    wants.  This is what lets the single-container layout grow the conversation
+    above the message box without a manual rerun.
+
+    On success the reply is appended to st.session_state["messages"].  On
+    failure the unanswered participant message is popped - leaving it in history
+    without a paired assistant reply would send two consecutive user turns to
+    the API on the next message - and a visible error is shown.  When
+    MAX_EXCHANGES is set and has been reached, limit_reached is flipped so the
+    message box is disabled on the next rerun.
+
+    Parameters
+    ----------
+    active_condition : dict
+        The resolved condition dict for this session.
+
+    Returns
+    -------
+    (response, user_turns) : tuple[str | None, int]
+        response is the reply text, or None if the API call failed.
+        user_turns is the number of participant messages sent so far,
+        including the one being answered.
+    """
+    user_turns = sum(
+        1 for m in st.session_state["messages"] if m["role"] == "user"
+    )
+    api_messages = build_api_messages(
+        st.session_state["messages"],
+        active_condition["system_prompt"],
+    )
+
+    response = None
+    with st.chat_message("assistant"):
+        try:
+            # Per-condition temperature/max_tokens override the global defaults,
+            # falling back to TEMPERATURE and MAX_TOKENS if the condition dict
+            # does not define them.
+            call_kwargs = {
+                "model":    active_condition["model"],
+                "messages": api_messages,
+            }
+            temp    = active_condition.get("temperature", TEMPERATURE)
+            max_tok = active_condition.get("max_tokens",  MAX_TOKENS)
+            if temp is not None:
+                call_kwargs["temperature"] = temp
+            if max_tok is not None:
+                call_kwargs["max_tokens"] = max_tok
+
+            call_kwargs["stream"] = True
+            stream = client.chat.completions.create(**call_kwargs)
+
+            def _throttled(s):
+                for chunk in s:
+                    yield chunk
+                    time.sleep(0.05)
+
+            response = st.write_stream(_throttled(stream))
+
+            # Some proxy implementations return an empty stream instead of
+            # raising an exception on error (e.g. rate-limit 429).  Treat an
+            # empty response as a failure so the error handler fires.
+            if not response:
+                raise RuntimeError(
+                    "The model returned an empty response. "
+                    "This may be a rate-limit or temporary API issue. "
+                    "Please wait a moment and try again."
+                )
+
+        except Exception as e:
+            response = None
+            st.session_state["messages"].pop()
+            st.error(
+                f"**Could not reach the LLM.** "
+                f"Check your `API_BASE_URL` and `OPENAI_API_KEY`.\n\n"
+                f"Error: `{e}`"
+            )
+
+    if response:
+        st.session_state["messages"].append({
+            "role":      "assistant",
+            "content":   response,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        if MAX_EXCHANGES is not None and user_turns >= MAX_EXCHANGES:
+            st.session_state["limit_reached"] = True
+
+    return response, user_turns
+
+
 # =============================================================================
 #  MAIN CHAT INTERFACE
 # =============================================================================
@@ -930,7 +1052,10 @@ client = get_client(OPENAI_API_KEY, API_BASE_URL)
 #
 #  Stage 1 - Passcode gate  (any mode where all conditions define a passcode)
 #    • Displayed when st.session_state["passcode_accepted"] is False.
-#    • A form with a single text input collects the passcode.
+#    • A plain text input plus a button collects the passcode (a bare input
+#      rather than st.form, so the transient "Missing Submit Button" warning
+#      Streamlit briefly shows behind an iframe/proxy never appears).  A valid
+#      code advances on Enter or via the button.
 #    • Valid entry maps to a condition index, sets passcode_accepted=True,
 #      and triggers a full rerun so stage 1 is skipped on subsequent runs.
 #    • Invalid entry shows an inline error; the gate remains visible.
@@ -940,16 +1065,22 @@ client = get_client(OPENAI_API_KEY, API_BASE_URL)
 #
 #  Stage 2 - Active chat
 #    • Displayed when chat_ended is False.
-#    • The optional welcome banner is rendered first.
+#    • Default layout (END_CHAT_BUTTON_BELOW = True): the welcome banner,
+#      conversation history, and message box are wrapped in one bordered
+#      container, with the End button directly below it.  Fallback layout
+#      (False): End button top-right, default bottom-docked message box.
 #    • All messages in st.session_state["messages"] are replayed in order
 #      so the full conversation history is visible on every rerun.
 #    • st.chat_input() blocks further execution until the participant sends
 #      a message; the user message is appended, then the LLM is called.
-#    • The response is streamed token-by-token via st.write_stream() to give
-#      a natural, responsive feel even on slow connections.
-#    • The End button appears in a right-aligned column after the first
-#      exchange.  A two-step confirmation (End → Confirm) prevents
-#      participants from accidentally discarding their conversation.
+#    • The response is streamed token-by-token via generate_reply() /
+#      st.write_stream() to give a natural, responsive feel even on slow
+#      connections.
+#    • The End button appears after the first exchange.  A two-step
+#      confirmation (End → Confirm) prevents participants from accidentally
+#      discarding their conversation.
+#    • If MAX_EXCHANGES is reached, the message box is disabled and the
+#      participant is asked to click End chat to finish (soft cap).
 #
 #  Stage 3 - Transcript panel
 #    • Displayed when chat_ended is True.
@@ -986,17 +1117,33 @@ if not st.session_state["passcode_accepted"]:
         f'{PASSCODE_ENTRY_PROMPT}</p>',
         unsafe_allow_html=True,
     )
-    with st.form("key_form"):
-        _code = st.text_input("Passcode", placeholder="Enter your passcode")
-        _submitted = st.form_submit_button("Start →", type="primary")
-    if _submitted:
-        _idx = _passcode_map.get(_code.strip().lower())
-        if _idx is not None:
-            st.session_state["condition_index"] = _idx
-            st.session_state["passcode_accepted"] = True
-            st.rerun()
-        else:
-            st.error("Code not recognised. Please check and try again.")
+    # A plain text input + button instead of st.form: while a form's elements
+    # stream in during initial load behind an iframe/proxy (e.g. Qualtrics), a
+    # form is briefly seen without its submit button and Streamlit flashes a
+    # transient "Missing Submit Button" error that clears once the button
+    # renders.  A bare input + button skips the form submit-button check
+    # entirely, so the flash cannot occur.  A valid code advances on Enter (the
+    # input commits its value) or via the button.
+    _code = st.text_input(
+        "Passcode",
+        placeholder="Enter your passcode here",
+        label_visibility="collapsed",
+    )
+    _go = st.button("Start the conversation →", type="primary", width="content")
+    _code_clean = _code.strip()
+    _idx = _passcode_map.get(_code_clean.lower()) if _code_clean else None
+    if _idx is not None:
+        st.session_state["condition_index"] = _idx
+        st.session_state["passcode_accepted"] = True
+        st.rerun()
+    elif _code_clean:
+        # A non-empty code that didn't match.  Show the error whether they
+        # pressed Enter (the input commits and reruns, so _go is False here) or
+        # clicked the button - keying this on _go alone would miss the Enter case.
+        st.error("Code not recognised. Please check and try again.")
+    elif _go:
+        # Button clicked with an empty box.
+        st.error("Please enter your passcode.")
     st.stop()
 
 # Passcode accepted (or not required) - condition is now resolved.
@@ -1015,143 +1162,134 @@ if _initial_msg and not st.session_state["messages"]:
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
-# ── End Chat button - appears after the first exchange ────────────────────────
-# Placed below the header so it does not compete with the title layout.
-if not st.session_state["chat_ended"] and st.session_state["has_sent_message"]:
-    _, end_col = st.columns([4, 2])
-    with end_col:
-        if not st.session_state["confirm_end"]:
-            if st.button("End chat", use_container_width=True, type="secondary"):
-                st.session_state["confirm_end"] = True
-                st.rerun()
-        else:
-            # Second click required to confirm - prevents accidental endings
-            if st.button("✓ Confirm end", use_container_width=True, type="primary"):
-                st.session_state["chat_ended"] = True
-                st.rerun()
-
 # ── Active chat ───────────────────────────────────────────────────────────────
+#
+#  Two layouts, selected by END_CHAT_BUTTON_BELOW (see RESEARCHER CONFIGURATION):
+#    True  - the whole chat (welcome banner, history, message box) is wrapped in
+#            ONE bordered container and the End-chat button is rendered directly
+#            below it.  Nesting st.chat_input in a container makes Streamlit
+#            render it inline at the bottom of the container instead of docking
+#            it to the viewport, so the button sits naturally under the chat.
+#            New turns are written into an inner container above the input, so
+#            the conversation grows above the box without a rerun.
+#    False - fallback: a small End-chat button top-right, above the conversation,
+#            with the default bottom-docked st.chat_input.
+#
+#  In both layouts the End button appears only after the first exchange
+#  (has_sent_message) and uses a two-step End -> Confirm to prevent accidental
+#  termination.  When MAX_EXCHANGES is reached, limit_reached disables the box
+#  and asks the participant to click End chat (a soft cap - the transcript is
+#  not shown automatically).
 if not st.session_state["chat_ended"]:
 
-    # Optional welcome / instruction message - hidden once chatting has begun,
-    # or immediately if the participant just passed through the passcode gate.
-    if WELCOME_MESSAGE and not _passcode_routing and not st.session_state["has_sent_message"]:
-        st.markdown(
-            f'<div class="welcome-banner">{WELCOME_MESSAGE}</div>',
-            unsafe_allow_html=True,
-        )
-
-    # Render conversation history.
-    # Every message stored in st.session_state["messages"] is displayed on
-    # each rerun, giving the participant a full view of the conversation.
-    # st.chat_message() renders a colored avatar and indented bubble whose
-    # style depends on the role: "user" gets a right-aligned bubble and
-    # "assistant" a left-aligned one, matching familiar chat conventions.
-    for message in st.session_state["messages"]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Chat input - hidden once chat_ended is True
-    if prompt := st.chat_input("Type your message here…"):
-
-        prompt = prompt.strip()
-        if not prompt:
-            st.stop()
-
-        # Append and immediately display the user's message
-        st.session_state["messages"].append({
-            "role": "user",
-            "content": prompt,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        st.session_state["has_sent_message"] = True  # reveal End button from now on
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Build the full message list for the API call.
-        # See build_api_messages() in the HELPER FUNCTIONS section for details.
-        api_messages = build_api_messages(
-            st.session_state["messages"],
-            condition["system_prompt"],
-        )
-
-        # Stream the model's response token-by-token.
-        with st.chat_message("assistant"):
-            try:
-                # Per-condition temperature/max_tokens override the global
-                # defaults, falling back to TEMPERATURE and MAX_TOKENS if the
-                # condition dict does not define them.
-                _call_kwargs = {
-                    "model":    condition["model"],
-                    "messages": api_messages,
-                }
-                _temp     = condition.get("temperature", TEMPERATURE)
-                _max_tok  = condition.get("max_tokens",  MAX_TOKENS)
-                if _temp is not None:
-                    _call_kwargs["temperature"] = _temp
-                if _max_tok is not None:
-                    _call_kwargs["max_tokens"] = _max_tok
-
-                _call_kwargs["stream"] = True
-                stream   = client.chat.completions.create(**_call_kwargs)
-
-                def _throttled(s):
-                    for chunk in s:
-                        yield chunk
-                        time.sleep(0.05)
-
-                response = st.write_stream(_throttled(stream))
-
-                # Some proxy implementations return an empty stream instead of
-                # raising an exception on error (e.g. rate-limit 429).  Treat
-                # an empty response as a failure so the error handler fires.
-                if not response:
-                    raise RuntimeError(
-                        "The model returned an empty response. "
-                        "This may be a rate-limit or temporary API issue. "
-                        "Please wait a moment and try again."
-                    )
-
-            except Exception as e:
-                response = None
-                # Remove the user message we just appended - leaving it in
-                # history without a paired assistant reply would send two
-                # consecutive user turns to the API on the next message.
-                st.session_state["messages"].pop()
-                st.error(
-                    f"**Could not reach the LLM.** "
-                    f"Check your `API_BASE_URL` and `OPENAI_API_KEY`.\n\n"
-                    f"Error: `{e}`"
+    if END_CHAT_BUTTON_BELOW:
+        # ---- Single-component layout: whole chat in one bordered container ---
+        chat_box = st.container(border=True)
+        with chat_box:
+            # Persistent welcome banner at the top of the chat.  In passcode
+            # mode it is shown on the gate screen instead, so skip it here.
+            if WELCOME_MESSAGE and not _passcode_routing:
+                st.markdown(
+                    f'<div class="welcome-banner">{WELCOME_MESSAGE}</div>',
+                    unsafe_allow_html=True,
                 )
 
-        # Save the completed assistant response to history.
-        if response:
-            st.session_state["messages"].append({
-                "role":      "assistant",
-                "content":   response,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            # Inner container for the conversation, kept above the input.
+            msgs_area = st.container()
+            with msgs_area:
+                for message in st.session_state["messages"]:
+                    with st.chat_message(message["role"]):
+                        st.markdown(message["content"])
 
-        # Auto-end when MAX_EXCHANGES limit is reached.
-        # Count only participant turns (role == "user") so that a seeded
-        # initial_message (role == "assistant") does not affect the tally.
-        if MAX_EXCHANGES is not None:
-            _user_turns = sum(
-                1 for m in st.session_state["messages"] if m["role"] == "user"
+            # Message box renders inline at the bottom of the container.  When
+            # the soft cap is reached it is replaced by a short notice.
+            if st.session_state["limit_reached"]:
+                st.info(
+                    "This conversation has reached its maximum length. "
+                    "Please click **End chat** below to finish and copy your transcript."
+                )
+            elif prompt := st.chat_input("Type your message here…"):
+                prompt = prompt.strip()
+                if prompt:
+                    st.session_state["messages"].append({
+                        "role":      "user",
+                        "content":   prompt,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                    st.session_state["has_sent_message"] = True
+                    # New bubbles go into the history area, above the input.
+                    with msgs_area:
+                        with st.chat_message("user"):
+                            st.markdown(prompt)
+                        _resp, _ut = generate_reply(condition)
+                    # Rerun to surface the disabled-box notice the moment the
+                    # soft cap is reached.  The End button below already shows
+                    # this run, since has_sent_message is now True.
+                    if _resp and st.session_state["limit_reached"]:
+                        st.rerun()
+
+        # End-chat button, sitting just below the whole chat.  Hidden until the
+        # first exchange so it never shows before any conversation has happened.
+        if st.session_state["has_sent_message"]:
+            _end_col, _ = st.columns([2, 4])
+            with _end_col:
+                if not st.session_state["confirm_end"]:
+                    if st.button("End chat", width="stretch", type="secondary"):
+                        st.session_state["confirm_end"] = True
+                        st.rerun()
+                else:
+                    # Second click required to confirm - prevents accidental endings
+                    if st.button("✓ Confirm ending this chat", width="stretch", type="primary"):
+                        st.session_state["chat_ended"] = True
+                        st.rerun()
+
+    else:
+        # ---- Fallback layout: top-right End button, default docked input -----
+        if st.session_state["has_sent_message"]:
+            _, _end_col = st.columns([4, 2])
+            with _end_col:
+                if not st.session_state["confirm_end"]:
+                    if st.button("End chat", width="stretch", type="secondary"):
+                        st.session_state["confirm_end"] = True
+                        st.rerun()
+                else:
+                    # Second click required to confirm - prevents accidental endings
+                    if st.button("✓ Confirm ending this chat", width="stretch", type="primary"):
+                        st.session_state["chat_ended"] = True
+                        st.rerun()
+
+        if WELCOME_MESSAGE and not _passcode_routing:
+            st.markdown(
+                f'<div class="welcome-banner">{WELCOME_MESSAGE}</div>',
+                unsafe_allow_html=True,
             )
-            if _user_turns >= MAX_EXCHANGES:
-                st.session_state["chat_ended"] = True
-                st.session_state["auto_ended"] = True
-                st.rerun()
 
-        # On the very first user exchange, force a rerun so the End button
-        # becomes visible immediately.  Count only user turns so this fires
-        # correctly whether or not an initial_message is configured.
-        _user_turns_now = sum(
-            1 for m in st.session_state["messages"] if m["role"] == "user"
-        )
-        if _user_turns_now == 1:
-            st.rerun()
+        for message in st.session_state["messages"]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        if st.session_state["limit_reached"]:
+            st.info(
+                "This conversation has reached its maximum length. "
+                "Please click **End chat** (top right) to finish and copy your transcript."
+            )
+        elif prompt := st.chat_input("Type your message here…"):
+            prompt = prompt.strip()
+            if prompt:
+                st.session_state["messages"].append({
+                    "role":      "user",
+                    "content":   prompt,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                st.session_state["has_sent_message"] = True
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                _resp, _ut = generate_reply(condition)
+                # Rerun to reveal the top-right End button on the first exchange
+                # (it renders above the input, so it isn't visible until the next
+                # run) or to surface the soft-cap notice.
+                if _resp and (_ut == 1 or st.session_state["limit_reached"]):
+                    st.rerun()
 
 # =============================================================================
 #  POST-CHAT TRANSCRIPT
@@ -1172,14 +1310,6 @@ if not st.session_state["chat_ended"]:
 #      df   <- as.data.frame(data$messages)   # one row per turn
 #
 else:
-    # Show a brief completion notice when the chat was auto-ended by
-    # MAX_EXCHANGES (as opposed to the participant clicking End chat).
-    if st.session_state.get("auto_ended"):
-        st.info(
-            "The conversation is now complete. "
-            "Please copy your transcript below and paste it into the survey."
-        )
-
     # Collect participant message indices and build transcript first.
     # Checkbox state persists in st.session_state across rerenders, so the
     # JSON is always up-to-date even though the checkboxes render below.
@@ -1244,24 +1374,38 @@ else:
             width: 100%; height: 80px; font-size: 0.75rem;
             font-family: monospace; margin-top: 0.25rem;
           }}
+          @keyframes pasteArrowBounce {{ 0%, 100% {{ transform: translateY(0); }} 50% {{ transform: translateY(10px); }} }}
+          #paste-hint {{ display: none; text-align: center; margin-top: 18px; color: #5C6C79; font-size: 1.1rem; font-weight: 600; }}
+          #paste-hint .paste-how {{ display: block; margin-top: 6px; font-size: 0.92rem; font-weight: 400; }}
+          #paste-hint .arrow {{ display: block; font-size: 3rem; line-height: 1.1; margin-top: 4px; animation: pasteArrowBounce 1.2s ease-in-out infinite; }}
         </style>
         <button id="copy-btn">
-          &#10003;&nbsp; Copy your conversation transcript
+          &#10003;&nbsp; Click here to copy your conversation transcript
         </button>
         <div id="fallback">
-          <p>Automatic copy failed. Select all and copy manually:</p>
+          <p>Automatic copy failed. Please select all and copy manually:</p>
           <textarea id="fallback-ta" readonly></textarea>
+        </div>
+        <div id="paste-hint">
+          Now paste it into the box below.
+          <span class="paste-how">
+            On a computer: Ctrl+V (Windows) or Cmd+V (Mac).<br>
+            On a phone or tablet: press and hold the box, then tap Paste.
+          </span>
+          <span class="arrow">&#8595;</span>
         </div>
         <script>
         (function() {{
           var btn = document.getElementById('copy-btn');
           var fb = document.getElementById('fallback');
           var ta = document.getElementById('fallback-ta');
+          var hint = document.getElementById('paste-hint');
           var text = {_js_str};
           btn.addEventListener('click', function() {{
             function onSuccess() {{
-              btn.textContent = '\u2713 Copied! Paste it in the below question to proceed.';
+              btn.textContent = '\u2713 Copied! Paste it in the question below to proceed.';
               btn.disabled = true;
+              hint.style.display = 'block';
             }}
             function onFail() {{
               btn.style.display = 'none';

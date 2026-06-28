@@ -33,9 +33,14 @@ _st_mock.session_state = {
     "chat_ended":        False,
     "confirm_end":       False,
     "has_sent_message":  False,
+    "limit_reached":     False,
     "messages":          [],
 }
 _st_mock.cache_resource = lambda fn: fn   # no-op decorator
+# st.columns(...) is unpacked into two variables by the chat layout (e.g.
+# `_end_col, _ = st.columns([2, 4])`).  A bare MagicMock iterates as empty and
+# would raise on unpack, so return a fixed pair of context-manager mocks.
+_st_mock.columns.return_value = [MagicMock(), MagicMock()]
 
 sys.modules.setdefault("streamlit",             _st_mock)
 sys.modules.setdefault("streamlit.components",      MagicMock())

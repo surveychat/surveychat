@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite the article from preferred-citation."
+message: "If you use this software, please cite the preprint listed under preferred-citation."
 title: "surveychat"
 version: "1.0.0"
 date-released: "2026-03-06"
@@ -19,5 +19,7 @@ preferred-citation:
       given-names: Saurabh
       orcid: "https://orcid.org/0000-0002-9346-4896"
   year: 2026
-  journal: "Journal of Open Source Software"
-  
+  doi: "10.31235/osf.io/hp2mu_v1"
+  url: "https://doi.org/10.31235/osf.io/hp2mu_v1"
+  publisher:
+    name: "SocArXiv"
